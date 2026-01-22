@@ -6,7 +6,6 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from .config import SKILL_TOKENS
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -22,10 +21,6 @@ def normalize_ws(s: str) -> str:
 def extract_skills(text: str) -> List[str]:
     t = normalize_ws(text).lower()
     found = []
-    for tok in SKILL_TOKENS:
-        if tok.lower() in t:
-            found.append(tok)
-    # unique while preserving order
     seen = set()
     out = []
     for x in found:
