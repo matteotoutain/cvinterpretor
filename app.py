@@ -204,22 +204,6 @@ with tabs[1]:
                     title = f"{row['filename']} — score {row['score']:.3f}"
                     with st.expander(title, expanded=False):
                         expl = explain_match(ao_text, row["cv_text"])
-
-                        c1, c2 = st.columns([1, 1])
-                        with c1:
-                            st.markdown("**Ce qui colle (skills en commun)**")
-                            if expl["overlap"]:
-                                st.write(", ".join(expl["overlap"]))
-                            else:
-                                st.write("Aucun overlap détecté (dico skills minimal).")
-
-                        with c2:
-                            st.markdown("**Ce qui manque côté CV (skills AO non vus)**")
-                            if expl["missing"]:
-                                st.write(", ".join(expl["missing"][:40]) + ("…" if len(expl["missing"]) > 40 else ""))
-                            else:
-                                st.write("Rien de critique détecté.")
-
                         st.markdown("**Extrait CV (début)**")
                         st.write((row["cv_text"] or "")[:1500] + ("…" if len(row["cv_text"] or "") > 1500 else ""))
 
