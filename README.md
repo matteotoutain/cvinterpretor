@@ -5,7 +5,10 @@ PoC minimaliste centré sur **2 blocs** :
 2. **AO Import & NLP Analysis** : upload d’un AO → matching à la volée (AO non stocké) → résultats + explications
 
 ## Lancer en local
-
+1. **Créer une clé api MISTRAL** via ce lien:  https://admin.mistral.ai/organization/api-keys , pui copier la clé
+2. **Créer un fichier nommé .env**  à la racine du projet et y ajouter :
+*MISTRAL_API_KEY=ta_clé_api*
+3. **Via le terminal git bash :**
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # (Windows: .venv\Scripts\activate)

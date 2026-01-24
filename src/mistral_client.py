@@ -3,7 +3,8 @@ import json
 from typing import Any, Dict, Optional
 
 from mistralai import Mistral
-
+from dotenv import load_dotenv
+load_dotenv()
 
 DEFAULT_MODEL = "mistral-medium-latest"
 
