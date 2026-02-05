@@ -4,18 +4,6 @@ PoC minimaliste centré sur **2 blocs** :
 1. **Batch CV Import** : upload de CVs → extraction texte → stockage en **SQLite local**
 2. **AO Import & NLP Analysis** : upload d’un AO → matching à la volée (AO non stocké) → résultats + explications
 
-## Lancer en local
-1. **Créer une clé api MISTRAL** via ce lien:  https://admin.mistral.ai/organization/api-keys , pui copier la clé
-2. **Créer un fichier nommé .env**  à la racine du projet et y ajouter :
-*MISTRAL_API_KEY=ta_clé_api*
-3. **Via le terminal git bash :**
-```bash
-python -m venv .venv
-source .venv/bin/activate  # (Windows: .venv\Scripts\activate)
-pip install -r requirements.txt
-streamlit run app.py
-```
-
 ## Formats supportés
 - CV : `.pptx` (priorité), `.pdf`, `.docx`, `.txt`
 - AO : `.pdf`, `.docx`, `.txt`, `.pptx`
@@ -25,9 +13,3 @@ streamlit run app.py
 - **Matching** : cosine similarity
   - tente `sentence-transformers/all-MiniLM-L6-v2` si dispo
   - fallback TF-IDF si le modèle n’est pas téléchargeable
-- **Explication** : overlap de compétences via un petit dictionnaire (`src/config.py → SKILL_TOKENS`)
-
-## Extensions faciles (si tu veux level-up)
-- Ajouter une étape d’extraction structurée (nom / rôle / seniorité / tech) via LLM **ou** règles + NER
-- Enrichir le dico skills (ou un référentiel type ESCO)
-- Ajouter un “why” plus solide : passages CV les plus proches de l’AO, citations, etc.
