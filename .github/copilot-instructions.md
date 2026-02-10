@@ -24,8 +24,17 @@ app.py (Streamlit UI - 3 tabs)
 Data Flow:
 1. CV Upload → extract_text_generic() → optional Mistral JSON extraction → upsert_cv()
 2. AO Upload → extract_text_generic() → optional Mistral structuring → compute_similarity()
-3. Similarity Scores + Skill Overlap → explain_match() (currently stubbed)
+3. **NEW**: Skill Extraction & Seniority Matching → explain_match() returns 4-part score
 4. Session State Persistence: ao_analysis_results stored across UI interactions
+
+**Scoring System (NEW - Feb 10, 2026)**:
+- Tab 2 results now display **4 integrated scores**:
+  - **NLP Score** (50% weight): Semantic similarity (0-1)
+  - **Skills Score** (30% weight): Competency overlap ratio (0-1)
+  - **Seniority Score** (20% weight): Experience level alignment (0-1)
+  - **Global Score**: Weighted combination of above three
+- Results sorted by Global Score (descending)
+- See [SCORING_SYSTEM.md](SCORING_SYSTEM.md) for detailed scoring rules
 ```
 
 ## Key Components & Responsibilities
@@ -62,17 +71,29 @@ Uses Mistral API (via `mistralai` SDK) with JSON extraction mode:
 - **AO extraction**: titre_poste, contexte_mission, competences_techniques, competences_metier, experience_requise, langues_requises
 
 ### `src/nlp.py` - Similarity & Explanation Engine
-Two matching strategies with automatic fallback:
+Three matching strategies with automatic fallback:
 
 **compute_similarity(query, documents)**: 
 - **Primary**: Sentence Transformers (`sentence-transformers/all-MiniLM-L6-v2`) - semantic embeddings, requires download (~100MB), may fail offline
 - **Fallback**: TF-IDF vectorization - stateless, no external models, ~95% accuracy vs semantic for this domain
 - Returns `(cosine_scores, method_name)` where scores ∈ [0,1]
 
-**explain_match(ao_text, cv_text)**:
-- Currently relies on `extract_skills()` which is **stubbed out** (returns empty list)
-- Compares skill sets: `{"overlap": [...], "missing": [...], "ao_skills": [...], "cv_skills": [...]}`
-- **TODO**: Implement skill extraction via regex pattern matching or Mistral (see README)
+**extract_skills(text)** (IMPLEMENTED - Feb 10, 2026):
+- Extracts 80+ recognized skills from text using `SKILL_DICT`
+- Skills include: programming languages, frameworks, cloud/DevOps, databases, tools, soft skills
+- Word boundary matching with regex, case-insensitive
+- Returns `List[str]` of found skills
+
+**explain_match(ao_text, cv_text, ao_seniority, cv_seniority)** (ENHANCED - Feb 10, 2026):
+- Returns dict with:
+  - `overlap`: Common skills between AO and CV
+  - `missing`: Skills required by AO but not in CV
+  - `skill_overlap_ratio`: Score 0-1 (overlap_count / ao_skills_count)
+  - `seniority_match_score`: Score 0-1 based on experience level alignment
+  - `ao_seniority`, `cv_seniority`: Original seniority strings
+- **Seniority Matching Rules** (cf. `_calculate_seniority_match()`):
+  - Exact match: 1.0 | One level off: 0.75 | Two levels: 0.5 | Three+: 0.25 | Missing: 0.5
+  - Recognizes: "Junior" (0-2y), "Confirmé" (2-5y), "Senior" (5-10y), "Expert" (10+y), "N years"
 
 ### `src/config.py` - Static Configuration
 Minimal config: paths (`BASE_DIR`, `DATA_DIR`, `DB_PATH`), app name. No runtime settings.
@@ -96,7 +117,11 @@ streamlit run app.py
 
 ### Testing Patterns
 - **Manual testing**: Upload 3-5 sample CVs to verify extraction quality
+- **Scoring validation**: Check that global score = (nlp × 0.5) + (skills × 0.3) + (seniority × 0.2)
+- **Skill extraction**: Verify skills from SKILL_DICT are correctly found in text
+- **Seniority matching**: Test edge cases (missing data, unrecognized formats)
 - **Regression risk**: Mistral API changes or downtime; always test fallback (TF-IDF matching still works)
+- **Scoring verification**: See SCORING_SYSTEM.md for test examples
 - **Database state**: `.env` controls API key; `data/cv_database.db` is local and persistent
 
 ## Project-Specific Conventions

@@ -3,6 +3,7 @@ import pandas as pd
 import io
 import zipfile
 import datetime
+import plotly.graph_objects as go
 
 from src.config import APP_NAME
 from src.db import connect, init_db, upsert_cv, list_cvs, get_cv_texts, delete_cv
@@ -11,6 +12,31 @@ from src.nlp import compute_similarity, explain_match
 
 # NEW: Mistral (as in your notebook style)
 from src.mistral_client import call_mistral_json_extraction, DEFAULT_MODEL
+
+# Function to create radar chart
+def create_radar_chart(nlp_score, skill_score, seniority_score, global_score):
+    """Create a radar chart showing all 4 match scores."""
+    categories = ['NLP Score', 'Skills Score', 'Seniority Score', 'Global Score']
+    values = [nlp_score, skill_score, seniority_score, global_score]
+    
+    fig = go.Figure(data=go.Scatterpolar(
+        r=values,
+        theta=categories,
+        fill='toself',
+        name='Match Scores',
+        line_color='#1f77b4',
+        fillcolor='rgba(31, 119, 180, 0.3)'
+    ))
+    
+    fig.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+        showlegend=False,
+        height=400,
+        margin=dict(l=60, r=60, t=60, b=60),
+        title=dict(text='Profil de correspondance', x=0.5, xanchor='center')
+    )
+    
+    return fig
 
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
@@ -272,22 +298,52 @@ with tabs[1]:
                             title = f"⭐ {title}"
 
                         with st.expander(title, expanded=(idx <= 3)):
-                            col1, col2 = st.columns([3, 1])
+                            col1, col2, col3, col4 = st.columns(4)
                             with col1:
-                                st.markdown("**Info CV**")
-                                info_data = {
-                                    "Nom": row["nom"] or "—",
-                                    "Rôle": row["role_principal"] or "—",
-                                    "Seniorité": row["seniorite"] or "—",
-                                    "Secteur": row["secteur_principal"] or "—",
-                                    "Technologies": row["technologies"] or "—",
-                                    "Langues": row["langues"] or "—",
-                                }
-                                st.table(pd.DataFrame(info_data.items(), columns=["Champ", "Valeur"]))
+                                st.markdown("**Score NLP**")
+                                st.metric("Similarité", f"{row['score']:.3f}", delta=None)
 
+                            # Get seniority values from ao_struct and CV
+                            ao_seniority = ao_struct.get("experience_requise", "") if isinstance(ao_struct, dict) else ""
+                            cv_seniority = row.get("seniorite", "") or ""
+                            
+                            expl = explain_match(ao_text, row["cv_text"], ao_seniority, cv_seniority)
+                            
+                            # Skill overlap ratio score
+                            skill_ratio = expl.get("skill_overlap_ratio", 0.0)
                             with col2:
-                                st.markdown("**Score**")
-                                st.metric("Matching", f"{row['score']:.3f}", delta=None)
+                                st.markdown("**Score Compétences**")
+                                st.metric("Overlap Ratio", f"{skill_ratio:.3f}", delta=None)
+                            
+                            # Seniority match score
+                            seniority_score = expl.get("seniority_match_score", 0.5)
+                            with col3:
+                                st.markdown("**Score Seniorité**")
+                                st.metric("Match Seniorité", f"{seniority_score:.3f}", delta=None)
+                            
+                            # Calculate and display global score (weighted)
+                            # Weights: NLP 50%, Skills 30%, Seniority 20%
+                            global_score = (row['score'] * 0.5) + (skill_ratio * 0.3) + (seniority_score * 0.2)
+                            with col4:
+                                st.markdown("**Score Global**")
+                                st.metric("Score Pondéré", f"{global_score:.3f}", delta=None)
+                            
+                            # Radar chart visualization
+                            st.markdown("**Visualisation des scores**")
+                            radar_fig = create_radar_chart(row['score'], skill_ratio, seniority_score, global_score)
+                            st.plotly_chart(radar_fig, use_container_width=True)
+                            
+                            # Info CV
+                            st.markdown("**Info CV**")
+                            info_data = {
+                                "Nom": row["nom"] or "—",
+                                "Rôle": row["role_principal"] or "—",
+                                "Seniorité": row["seniorite"] or "—",
+                                "Secteur": row["secteur_principal"] or "—",
+                                "Technologies": row["technologies"] or "—",
+                                "Langues": row["langues"] or "—",
+                            }
+                            st.table(pd.DataFrame(info_data.items(), columns=["Champ", "Valeur"]))
 
                             st.markdown("**Extrait CV**")
                             st.text_area(
@@ -299,15 +355,17 @@ with tabs[1]:
                                 key=f"cv_text_{row['cv_id']}"
                             )
 
-                            expl = explain_match(ao_text, row["cv_text"])
                             st.markdown("**Analyse de correspondance**")
                             col_a, col_b = st.columns(2)
                             with col_a:
                                 st.write(f"✅ **Compétences correspondent** ({len(expl['overlap'])})")
-                                st.write(", ".join(expl["overlap"][:10]) if expl["overlap"] else "—")
+                                st.write(", ".join(expl["overlap"][:15]) if expl["overlap"] else "—")
                             with col_b:
                                 st.write(f"❌ **Compétences manquantes** ({len(expl['missing'])})")
-                                st.write(", ".join(expl["missing"][:10]) if expl["missing"] else "—")
+                                st.write(", ".join(expl["missing"][:15]) if expl["missing"] else "—")
+
+        except Exception as e:
+            st.error(str(e))
 
         except Exception as e:
             st.error(str(e))
