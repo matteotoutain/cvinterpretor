@@ -3,22 +3,25 @@ import pandas as pd
 import io
 import zipfile
 import datetime
+import json
 import plotly.graph_objects as go
 
 from src.config import APP_NAME
 from src.db import connect, init_db, upsert_cv, list_cvs, get_cv_texts, delete_cv
 from src.extract import extract_text_generic, stable_id_from_bytes
-from src.nlp import compute_similarity, explain_match
+from src.nlp import build_ao_blocks, build_cv_blocks, score_blocks, verdict_from_score
 
-# NEW: Mistral (as in your notebook style)
-from src.mistral_client import call_mistral_json_extraction, DEFAULT_MODEL
+from src.mistral_client import (
+    call_mistral_json_extraction,
+    call_mistral_json_explanation,
+    DEFAULT_MODEL,
+)
 
-# Function to create radar chart
-def create_radar_chart(nlp_score, skill_score, seniority_score, global_score):
-    """Create a radar chart showing all 4 match scores."""
-    categories = ['NLP Score', 'Skills Score', 'Seniority Score', 'Global Score']
-    values = [nlp_score, skill_score, seniority_score, global_score]
-    
+
+def create_radar_chart(skills_like, experience_like, domain_like, soft_like, global_score):
+    categories = ['Skills-like', 'Experience-like', 'Domain-like', 'Soft-like', 'Global']
+    values = [skills_like, experience_like, domain_like, soft_like, global_score]
+
     fig = go.Figure(data=go.Scatterpolar(
         r=values,
         theta=categories,
@@ -27,23 +30,20 @@ def create_radar_chart(nlp_score, skill_score, seniority_score, global_score):
         line_color='#1f77b4',
         fillcolor='rgba(31, 119, 180, 0.3)'
     ))
-    
+
     fig.update_layout(
         polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
         showlegend=False,
-        height=400,
-        margin=dict(l=60, r=60, t=60, b=60),
-        title=dict(text='Profil de correspondance', x=0.5, xanchor='center')
+        height=380,
+        margin=dict(l=40, r=40, t=60, b=40),
+        title=dict(text='Profil de correspondance (par blocs)', x=0.5, xanchor='center')
     )
-    
     return fig
 
-st.set_page_config(page_title=APP_NAME, layout="wide")
 
+st.set_page_config(page_title=APP_NAME, layout="wide")
 st.title(APP_NAME)
-st.caption(
-    "PoC focalisé sur : **Batch CV Import** (stockage local) + **AO Import & NLP Analysis** (ponctuel, sans stockage AO)."
-)
+st.caption("PoC focalisé sur : **Batch CV Import** (stockage local) + **AO Import & NLP Analysis** (ponctuel, sans stockage AO).")
 
 conn = connect()
 init_db(conn)
@@ -57,10 +57,9 @@ with tabs[0]:
     st.subheader("Étape 1 — Uploader des CVs (batch) → stockage en base locale (SQLite)")
     st.write("Formats supportés : **.pptx** (priorité), **.pdf**, **.docx**, **.txt**.")
 
-    # NEW: Mistral options (CV)
     st.markdown("### Options d'extraction (Mistral)")
     use_mistral = st.checkbox(
-        "Utiliser Mistral pour extraire des champs (nom, rôle, seniorité, technologies, langues, etc.)",
+        "Utiliser Mistral pour structurer le CV (blocs: skills, expériences, domaine, soft skills)",
         value=True,
     )
     mistral_model = st.text_input("Modèle Mistral (CV)", value=DEFAULT_MODEL, disabled=not use_mistral)
@@ -86,7 +85,6 @@ with tabs[0]:
                     if not text:
                         raise ValueError("Document vide après extraction")
 
-                    # Base row (structure inchangée)
                     row = {
                         "cv_id": cv_id,
                         "filename": f.name,
@@ -97,47 +95,49 @@ with tabs[0]:
                         "technologies": None,
                         "langues": None,
                         "cv_text": text,
+                        "cv_struct_json": None,
                     }
 
-                    # NEW: Mistral CV extraction (fills existing columns only)
                     if use_mistral:
-                        initial_extraction_prompt = (
+                        cv_extraction_prompt = (
                             "Extract the following detailed information from the provided CV text, translated in english. "
                             "Output the result as a single JSON object. If a field is not found, use `null`.\n\n"
                             "{\n"
                             '  "nom": "Full name of the person",\n'
-                            '  "role_principal": "Main role or title (e.g., \\"Senior Data Engineer\\", \\"Data Scientist NLP\\")",\n'
-                            '  "seniorite": "Seniority level (e.g., \\"Senior\\", \\"Confirmé\\", \\"Junior\\"); if you see Senior, Confirmé or Junior in the whole text then it should be that word.",\n'
-                            '  "secteur_principal": "Main industry sector(s) (e.g., \\"Banking\\", \\"Insurance\\", \\"Retail\\"), translated in english. List multiple if present, separated by comma.",\n'
-                            '  "technologies": "Key technologies, tools, or programming languages mentioned (e.g., \\"Python, SQL, Spark\\"). List multiple if present, separated by comma.",\n'
-                            '  "langues": "Languages spoken, translated in english. List multiple if present, separated by comma.",\n'
+                            '  "role_principal": "Main role or title",\n'
+                            '  "seniorite": "Seniority level or years of experience if present",\n'
+                            '  "secteur_principal": "Main industry sector(s), comma-separated",\n'
+                            '  "technologies": "Key tools/tech mentioned, comma-separated",\n'
+                            '  "langues": "Languages, comma-separated",\n'
+                            '  "hard_skills": ["List of hard skills / technologies as items"],\n'
+                            '  "soft_skills": ["List of soft skills as items"],\n'
+                            '  "experiences": [\n'
+                            '     {\n'
+                            '       "mission": "Short mission title/summary",\n'
+                            '       "secteur": "Domain/industry if stated",\n'
+                            '       "stack": ["Tech stack used on that mission"],\n'
+                            '       "duree": "Duration if stated"\n'
+                            '     }\n'
+                            "  ],\n"
                             '  "cv_text": "The CV main text, focusing on experience and key skills."\n'
                             "}\n"
                         )
 
                         extracted = call_mistral_json_extraction(
                             text_input=text,
-                            user_prompt=initial_extraction_prompt,
+                            user_prompt=cv_extraction_prompt,
                             mistral_model=mistral_model,
                         )
 
                         if extracted and not extracted.get("error"):
-                            for k in [
-                                "nom",
-                                "role_principal",
-                                "seniorite",
-                                "secteur_principal",
-                                "technologies",
-                                "langues",
-                                "cv_text",
-                            ]:
+                            # store key fields for quick display
+                            for k in ["nom", "role_principal", "seniorite", "secteur_principal", "technologies", "langues", "cv_text"]:
                                 if k in extracted and extracted[k] is not None:
                                     row[k] = extracted[k]
+                            # store full struct JSON (for block scoring)
+                            row["cv_struct_json"] = json.dumps(extracted, ensure_ascii=False)
                         else:
-                            st.write(
-                                f"⚠️ Mistral extraction failed for {f.name}: "
-                                f"{extracted.get('error') if extracted else 'Unknown error'}"
-                            )
+                            st.write(f"⚠️ Mistral extraction failed for {f.name}: {extracted.get('error') if extracted else 'Unknown error'}")
 
                     upsert_cv(conn, row)
                     st.write(f"✅ {f.name} ({doc_type}) — stocké (cv_id={cv_id})")
@@ -154,22 +154,25 @@ with tabs[0]:
     df = list_cvs(conn)
     st.dataframe(df, width=True, hide_index=True)
 
+
 # ---------------------------
 # 2) AO Import & NLP Analysis
 # ---------------------------
 with tabs[1]:
-    st.subheader("Étape 2 — Uploader un Appel d'Offre → Analyse NLP → Matching + explication")
+    st.subheader("Étape 2 — Uploader un Appel d'Offre → Analyse par blocs → Matching + explication")
     st.write("Ici l'AO n'est **pas** stocké : on calcule à la volée.")
 
-    # NEW: Mistral options (AO)
     st.markdown("### Options d'analyse AO (Mistral)")
-    use_mistral_ao = st.checkbox("Utiliser Mistral pour structurer l'AO (résumé + exigences)", value=True)
+    use_mistral_ao = st.checkbox("Utiliser Mistral pour structurer l'AO (blocs: skills, contexte, domaine, soft)", value=True)
     mistral_model_ao = st.text_input("Modèle Mistral (AO)", value=DEFAULT_MODEL, disabled=not use_mistral_ao)
+
+    st.markdown("### Options d'explication (Mistral)")
+    use_mistral_explain = st.checkbox("Générer une explication structurée (JSON) après scoring", value=True)
+    mistral_model_explain = st.text_input("Modèle Mistral (Explain)", value=DEFAULT_MODEL, disabled=not use_mistral_explain)
 
     ao_file = st.file_uploader("Dépose ton AO", type=["pdf", "docx", "txt", "pptx"], accept_multiple_files=False)
     top_k = st.slider("Nombre de profils à afficher", 3, 30, 10)
 
-    # Store analysis results in session state
     if "ao_analysis_results" not in st.session_state:
         st.session_state.ao_analysis_results = None
 
@@ -185,7 +188,6 @@ with tabs[1]:
             with st.expander("Voir l'extrait de l'AO"):
                 st.write(ao_text[:2500] + ("…" if len(ao_text) > 2500 else ""))
 
-            # Launch analysis button
             col1, col2 = st.columns([2, 1])
             with col1:
                 launch_analysis = st.button("🚀 Lance l'analyse", type="primary", key="launch_analysis")
@@ -200,12 +202,13 @@ with tabs[1]:
                             "Extract the following detailed information from the provided AO text, translated in english. "
                             "Output the result as a single JSON object. If a field is not found, use `null`.\n\n"
                             "{\n"
-                            '  "titre_poste": "Job title or main role for the mission (e.g., \\"Senior Data Engineer\\", \\"Data Scientist NLP\\")",\n'
+                            '  "titre_poste": "Job title or main role for the mission",\n'
                             '  "contexte_mission": "Brief summary of the mission context and objectives",\n'
-                            '  "competences_techniques": "Key technical skills required (e.g., \\"Python, SQL, Spark\\"). List multiple if present, separated by comma.",\n'
-                            '  "competences_metier": "Key business or soft skills required (e.g., \\"Project Management, Client Relationship\\"). List multiple if present, separated by comma.",\n'
-                            '  "experience_requise": "Required experience level or years (e.g., \\"7+ years\\", \\"Junior\\", \\"Senior\\")",\n'
-                            '  "langues_requises": "Languages required for the mission, translated in english. List multiple if present, separated by comma."\n'
+                            '  "competences_techniques": ["List of required technical skills"],\n'
+                            '  "competences_metier": ["List of business/soft skills expected"],\n'
+                            '  "secteur": "Industry domain if stated (banking, insurance, public sector, etc.)",\n'
+                            '  "experience_requise": "Required experience level or years",\n'
+                            '  "langues_requises": ["Languages required"]\n'
                             "}\n"
                         )
 
@@ -218,24 +221,68 @@ with tabs[1]:
                     cvs = get_cv_texts(conn)
                     if cvs.empty:
                         st.warning("Aucun CV en base. Reviens à l'étape 1.")
+                        status.update(label="Analyse impossible (0 CV)", state="error")
                     else:
-                        scores, method = compute_similarity(ao_text, cvs["cv_text"].tolist())
-                        cvs = cvs.copy()
-                        cvs["score"] = scores
-                        cvs = cvs.sort_values("score", ascending=False).head(int(top_k))
+                        # Build AO blocks (structured if possible; fallback otherwise)
+                        if isinstance(ao_struct, dict) and not ao_struct.get("error"):
+                            ao_blocks = build_ao_blocks(ao_struct, ao_fallback_text=ao_text)
+                        else:
+                            ao_struct = {"error": ao_struct.get("error")} if isinstance(ao_struct, dict) else {"error": "AO struct failed"}
+                            ao_blocks = build_ao_blocks({}, ao_fallback_text=ao_text)
 
-                        # Store results in session state
+                        # Score each CV by blocks
+                        rows = []
+                        method_used = None
+
+                        for _, r in cvs.iterrows():
+                            cv_text = r.get("cv_text") or ""
+                            cv_struct_json = r.get("cv_struct_json")
+
+                            if cv_struct_json:
+                                try:
+                                    cv_struct = json.loads(cv_struct_json)
+                                except Exception:
+                                    cv_struct = {}
+                            else:
+                                cv_struct = {}
+
+                            cv_blocks = build_cv_blocks(cv_struct, cv_fallback_text=cv_text)
+                            scores, method = score_blocks(ao_blocks, cv_blocks)
+                            method_used = method_used or method
+
+                            rows.append({
+                                "cv_id": r["cv_id"],
+                                "filename": r["filename"],
+                                "nom": r.get("nom"),
+                                "role_principal": r.get("role_principal"),
+                                "seniorite": r.get("seniorite"),
+                                "secteur_principal": r.get("secteur_principal"),
+                                "technologies": r.get("technologies"),
+                                "langues": r.get("langues"),
+                                "cv_text": cv_text,
+                                "cv_struct_json": cv_struct_json,
+                                "skills_like": scores["skills_like"],
+                                "experience_like": scores["experience_like"],
+                                "domain_like": scores["domain_like"],
+                                "soft_like": scores["soft_like"],
+                                "global_score": scores["global_score"],
+                                "verdict": verdict_from_score(scores["global_score"]),
+                            })
+
+                        res = pd.DataFrame(rows).sort_values("global_score", ascending=False).head(int(top_k))
+
                         st.session_state.ao_analysis_results = {
                             "ao_struct": ao_struct,
-                            "cvs": cvs,
-                            "method": method,
+                            "ao_blocks": ao_blocks,
+                            "cvs": res,
+                            "method": method_used or "unknown",
                             "ao_text": ao_text,
                             "ao_file_name": ao_file.name,
                         }
 
                         status.update(label="Analyse terminée ✅", state="complete")
 
-                # Display results if available
+                # Display results
                 if st.session_state.ao_analysis_results:
                     results = st.session_state.ao_analysis_results
                     cvs = results["cvs"]
@@ -243,19 +290,16 @@ with tabs[1]:
                     method = results["method"]
                     ao_text = results["ao_text"]
 
-                    if ao_struct and not ao_struct.get("error"):
+                    if ao_struct and isinstance(ao_struct, dict) and not ao_struct.get("error"):
                         st.subheader("AO — résumé structuré (Mistral)")
                         st.json(ao_struct)
-                    elif ao_struct and ao_struct.get("error"):
+                    elif ao_struct and isinstance(ao_struct, dict) and ao_struct.get("error"):
                         st.warning(f"⚠️ Mistral AO extraction failed: {ao_struct.get('error')}")
 
-                    st.caption(f"Méthode de matching : **{method}** (cosine similarity).")
+                    st.caption(f"Méthode embeddings : **{method}** (cosine similarity).")
+                    st.info("Matching basé sur **blocs** (skills-like / experience-like / domain-like / soft-like).")
 
-                    st.info(
-                        "Matching basé sur le texte AO complet. Le résumé structuré sert à mieux expliquer les résultats."
-                    )
-
-                    # Download section
+                    # Download section (same as before, but based on global score)
                     st.divider()
                     st.subheader("📥 Télécharger les meilleurs CVs")
 
@@ -269,11 +313,10 @@ with tabs[1]:
                             key="num_download"
                         )
                     with col2:
-                        st.info(f"Score moyen : {cvs['score'].mean():.3f}")
+                        st.info(f"Score moyen : {cvs['global_score'].mean():.3f}")
 
                     top_cvs_to_download = cvs.head(num_to_download)
 
-                    # Create zip file with best CVs
                     zip_buffer = io.BytesIO()
                     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                         for idx, (_, row) in enumerate(top_cvs_to_download.iterrows(), 1):
@@ -293,47 +336,34 @@ with tabs[1]:
                     st.subheader("Résultats détaillés")
 
                     for idx, (_, row) in enumerate(cvs.iterrows(), 1):
-                        title = f"{idx}. {row['filename']} — score {row['score']:.3f}"
+                        title = f"{idx}. {row['filename']} — global {row['global_score']:.3f} — {row['verdict']}"
                         if idx <= num_to_download:
                             title = f"⭐ {title}"
 
                         with st.expander(title, expanded=(idx <= 3)):
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.markdown("**Score NLP**")
-                                st.metric("Similarité", f"{row['score']:.3f}", delta=None)
+                            c1, c2, c3, c4, c5 = st.columns(5)
+                            with c1:
+                                st.metric("Skills-like", f"{row['skills_like']:.3f}")
+                            with c2:
+                                st.metric("Experience-like", f"{row['experience_like']:.3f}")
+                            with c3:
+                                st.metric("Domain-like", f"{row['domain_like']:.3f}")
+                            with c4:
+                                st.metric("Soft-like", f"{row['soft_like']:.3f}")
+                            with c5:
+                                st.metric("Global", f"{row['global_score']:.3f}")
 
-                            # Get seniority values from ao_struct and CV
-                            ao_seniority = ao_struct.get("experience_requise", "") if isinstance(ao_struct, dict) else ""
-                            cv_seniority = row.get("seniorite", "") or ""
-                            
-                            expl = explain_match(ao_text, row["cv_text"], ao_seniority, cv_seniority)
-                            
-                            # Skill overlap ratio score
-                            skill_ratio = expl.get("skill_overlap_ratio", 0.0)
-                            with col2:
-                                st.markdown("**Score Compétences**")
-                                st.metric("Overlap Ratio", f"{skill_ratio:.3f}", delta=None)
-                            
-                            # Seniority match score
-                            seniority_score = expl.get("seniority_match_score", 0.5)
-                            with col3:
-                                st.markdown("**Score Seniorité**")
-                                st.metric("Match Seniorité", f"{seniority_score:.3f}", delta=None)
-                            
-                            # Calculate and display global score (weighted)
-                            # Weights: NLP 50%, Skills 30%, Seniority 20%
-                            global_score = (row['score'] * 0.5) + (skill_ratio * 0.3) + (seniority_score * 0.2)
-                            with col4:
-                                st.markdown("**Score Global**")
-                                st.metric("Score Pondéré", f"{global_score:.3f}", delta=None)
-                            
-                            # Radar chart visualization
-                            st.markdown("**Visualisation des scores**")
-                            radar_fig = create_radar_chart(row['score'], skill_ratio, seniority_score, global_score)
-                            st.plotly_chart(radar_fig, use_container_width=True)
-                            
-                            # Info CV
+                            st.plotly_chart(
+                                create_radar_chart(
+                                    row["skills_like"],
+                                    row["experience_like"],
+                                    row["domain_like"],
+                                    row["soft_like"],
+                                    row["global_score"],
+                                ),
+                                use_container_width=True
+                            )
+
                             st.markdown("**Info CV**")
                             info_data = {
                                 "Nom": row["nom"] or "—",
@@ -349,42 +379,62 @@ with tabs[1]:
                             st.text_area(
                                 "Contenu",
                                 (row["cv_text"] or "")[:1500] + ("…" if len(row["cv_text"] or "") > 1500 else ""),
-                                height=200,
+                                height=180,
                                 disabled=True,
                                 label_visibility="collapsed",
                                 key=f"cv_text_{row['cv_id']}"
                             )
 
-                            st.markdown("**Analyse de correspondance**")
-                            col_a, col_b = st.columns(2)
-                            with col_a:
-                                st.write(f"✅ **Compétences correspondent** ({len(expl['overlap'])})")
-                                st.write(", ".join(expl["overlap"][:15]) if expl["overlap"] else "—")
-                            with col_b:
-                                st.write(f"❌ **Compétences manquantes** ({len(expl['missing'])})")
-                                st.write(", ".join(expl["missing"][:15]) if expl["missing"] else "—")
+                            # Structured explanation (LLM)
+                            if use_mistral_explain:
+                                st.markdown("**Explication IA (structurée)**")
+                                cv_struct = {}
+                                if row.get("cv_struct_json"):
+                                    try:
+                                        cv_struct = json.loads(row["cv_struct_json"])
+                                    except Exception:
+                                        cv_struct = {}
+
+                                # fallback if AO struct failed
+                                ao_struct_for_explain = ao_struct if isinstance(ao_struct, dict) and not ao_struct.get("error") else {}
+                                score_payload = {
+                                    "skills_like": float(row["skills_like"]),
+                                    "experience_like": float(row["experience_like"]),
+                                    "domain_like": float(row["domain_like"]),
+                                    "soft_like": float(row["soft_like"]),
+                                    "global_score": float(row["global_score"]),
+                                    "verdict": row["verdict"],
+                                }
+
+                                explain = call_mistral_json_explanation(
+                                    ao_struct=ao_struct_for_explain,
+                                    cv_struct=cv_struct,
+                                    scores=score_payload,
+                                    mistral_model=mistral_model_explain,
+                                )
+
+                                if explain and not explain.get("error"):
+                                    st.json(explain)
+                                else:
+                                    st.warning(f"⚠️ Explain failed: {explain.get('error') if isinstance(explain, dict) else 'Unknown error'}")
 
         except Exception as e:
             st.error(str(e))
 
-        except Exception as e:
-            st.error(str(e))
 
 # ---------------------------
-# 3) Manage DB - IMPROVED
+# 3) Manage DB
 # ---------------------------
 with tabs[2]:
     st.subheader("🗂️ Gestion de la Base de Données CV")
-    
-    # Overview section
+
     st.markdown("### 📊 Vue d'ensemble")
     df_all = list_cvs(conn)
-    df_all_with_text = get_cv_texts(conn)  # Full data including cv_text
-    
+    df_all_with_text = get_cv_texts(conn)
+
     if df_all.empty:
         st.info("Aucun CV en base. Commencez par l'étape 1.")
     else:
-        # Stats
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("Total CVs", len(df_all))
@@ -392,41 +442,30 @@ with tabs[2]:
             filled_nom = df_all["nom"].notna().sum()
             st.metric("CVs avec nom", filled_nom)
         with col3:
-            filled_tech = df_all["technologies"].notna().sum()
-            st.metric("CVs enrichis", filled_tech)
+            filled_struct = df_all_with_text["cv_struct_json"].notna().sum()
+            st.metric("CVs structurés (JSON)", filled_struct)
         with col4:
-            avg_text_len = df_all["filename"].apply(lambda x: len(x) if x else 0).mean()
             st.metric("Fichiers catalogués", len(df_all))
-        
-        # Filters
+
         st.markdown("### 🔍 Filtrer & Analyser")
         col1, col2 = st.columns([2, 1])
-        
         with col1:
             search_term = st.text_input("Rechercher par nom de fichier ou nom de personne", "")
         with col2:
             show_full = st.checkbox("Afficher texte complet", value=False)
-        
-        # Apply filters
+
         df_filtered = df_all.copy()
         if search_term.strip():
-            search_lower = search_term.lower()
+            s = search_term.lower()
             df_filtered = df_filtered[
-                (df_filtered["filename"].str.lower().str.contains(search_lower, na=False)) |
-                (df_filtered["nom"].fillna("").str.lower().str.contains(search_lower, na=False))
+                (df_filtered["filename"].str.lower().str.contains(s, na=False)) |
+                (df_filtered["nom"].fillna("").str.lower().str.contains(s, na=False))
             ]
-        
+
         st.markdown(f"**{len(df_filtered)} CV(s) correspondant(s)**")
-        
-        # Display table with actions
-        st.markdown("### 📋 Liste des CVs")
-        
         display_cols = ["filename", "nom", "role_principal", "seniorite", "secteur_principal", "technologies", "langues"]
-        df_display = df_filtered[display_cols].copy()
-        st.dataframe(df_display, width=True, hide_index=True, use_container_width=True)
-        
-        
-        # Detailed view
+        st.dataframe(df_filtered[display_cols], width=True, hide_index=True, use_container_width=True)
+
         st.markdown("### 🔎 Détails & Actions")
         col1, col2 = st.columns([2, 1])
         with col1:
@@ -435,18 +474,16 @@ with tabs[2]:
                 df_filtered["filename"].tolist() if len(df_filtered) > 0 else ["— Aucun CV —"],
                 key="cv_selector"
             )
-        
         with col2:
             if st.button("🔄 Rafraîchir", key="refresh_db"):
                 st.rerun()
-        
+
         if selected_filename != "— Aucun CV —" and selected_filename in df_filtered["filename"].values:
-            # Get full row with cv_text from df_all_with_text
             selected_row = df_all_with_text[df_all_with_text["filename"] == selected_filename].iloc[0]
-            
+
             with st.expander(f"📄 Détails de {selected_filename}", expanded=True):
                 col1, col2 = st.columns([1, 1])
-                
+
                 with col1:
                     st.write("**Métadonnées extraites**")
                     meta_data = {
@@ -457,10 +494,11 @@ with tabs[2]:
                         "Secteur": selected_row["secteur_principal"] or "—",
                         "Technologies": selected_row["technologies"] or "—",
                         "Langues": selected_row["langues"] or "—",
+                        "Struct JSON": "✅" if selected_row.get("cv_struct_json") else "—",
                     }
                     for k, v in meta_data.items():
                         st.write(f"**{k}:** {v}")
-                
+
                 with col2:
                     st.write("**Actions**")
                     if st.button(f"📥 Télécharger CV", key=f"dl_{selected_row['cv_id']}"):
@@ -472,7 +510,7 @@ with tabs[2]:
                             mime="text/plain",
                             key=f"download_{selected_row['cv_id']}"
                         )
-                    
+
                     if st.button(f"🗑️ Supprimer ce CV", key=f"del_{selected_row['cv_id']}", type="secondary"):
                         try:
                             delete_cv(conn, selected_row["cv_id"])
@@ -480,39 +518,25 @@ with tabs[2]:
                             st.rerun()
                         except Exception as e:
                             st.error(f"❌ Erreur : {e}")
-                
+
                 if show_full and selected_row["cv_text"]:
                     st.markdown("**Contenu complet du CV**")
-                    st.text_area(
-                        "Texte",
-                        selected_row["cv_text"],
-                        height=300,
-                        disabled=True,
-                        label_visibility="collapsed"
-                    )
+                    st.text_area("Texte", selected_row["cv_text"], height=300, disabled=True, label_visibility="collapsed")
                 else:
                     st.markdown("**Aperçu du contenu** (2000 premiers caractères)")
                     preview = (selected_row["cv_text"] or "")[:2000] + ("…" if len(selected_row["cv_text"] or "") > 2000 else "")
-                    st.text_area(
-                        "Aperçu",
-                        preview,
-                        height=150,
-                        disabled=True,
-                        label_visibility="collapsed"
-                    )
-        
-        # Bulk actions
+                    st.text_area("Aperçu", preview, height=150, disabled=True, label_visibility="collapsed")
+
         st.divider()
         st.markdown("### ⚠️ Actions en masse")
-        
         col1, col2 = st.columns([2, 1])
         with col1:
             st.warning("Attention : les actions en masse sont définitives")
         with col2:
             if st.button("🗑️ Vider la base complète", key="clear_all", type="secondary"):
                 if st.session_state.get("confirm_clear", False):
-                    for _, row in df_all.iterrows():
-                        delete_cv(conn, row["cv_id"])
+                    for _, r in df_all.iterrows():
+                        delete_cv(conn, r["cv_id"])
                     st.success("✅ Base vidée")
                     st.rerun()
                 else:
