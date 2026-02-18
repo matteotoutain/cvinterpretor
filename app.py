@@ -171,7 +171,8 @@ with tabs[1]:
     ao_file = st.file_uploader("Dépose ton AO ici", type=["pdf", "docx", "txt", "pptx"], accept_multiple_files=False)
     ao_text = ""
     if ao_file:
-        ao_text = extract_text_generic(filename=ao_file.name, file_bytes=ao_file.getvalue())
+        ao_type, ao_text = extract_text_generic(filename=ao_file.name, file_bytes=ao_file.getvalue())
+        ao_text = (ao_text or "").strip()
 
     ao_pack = {}
     if ao_text.strip() and use_mistral_ao:
