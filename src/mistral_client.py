@@ -1,124 +1,302 @@
-# mistral_client.py
-
 import os
-import requests
+import json
+from typing import Any, Dict
 
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-MISTRAL_MODEL = "mistral-large-latest"
+from mistralai import Mistral
+from dotenv import load_dotenv
 
-API_URL = "https://api.mistral.ai/v1/chat/completions"
+load_dotenv()
+
+DEFAULT_MODEL = "mistral-medium-latest"
 
 
-def call_mistral(prompt: str):
-    headers = {
-        "Authorization": f"Bearer {MISTRAL_API_KEY}",
-        "Content-Type": "application/json"
-    }
+def _get_client() -> Mistral:
+    api_key = os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing env var MISTRAL_API_KEY")
+    return Mistral(api_key=api_key)
 
-    payload = {
-        "model": MISTRAL_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2
-    }
 
-    r = requests.post(API_URL, headers=headers, json=payload)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+def call_mistral_json_extraction(
+    text_input: str,
+    user_prompt: str,
+    mistral_model: str = DEFAULT_MODEL,
+) -> Dict[str, Any]:
+    """
+    Generic helper: ask for a JSON object and parse it.
+    """
+    client = _get_client()
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert at extracting structured information from text "
+                "and outputting it as a JSON object. Only output valid JSON."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"{user_prompt}\n\nHere is the text to analyze:\n```\n{text_input}\n```\n\n",
+        },
+    ]
+
+    try:
+        chat_response = client.chat.complete(
+            model=mistral_model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+        response_content = chat_response.choices[0].message.content
+        return json.loads(response_content)
+    except json.JSONDecodeError as e:
+        return {"error": f"JSON parse error: {e}"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ============================================================
-# 1) KEYWORD PACK EXTRACTION
+# Keyword packs (Noise removal BEFORE NLP)
 # ============================================================
+def build_cv_keyword_pack_prompt() -> str:
+    return (
+        "Extract a CLEAN 'keyword pack' from the provided CV text. Translate everything to English.\n"
+        "Output a single JSON object. If a field is not found, use null (or [] for lists).\n\n"
+        "{\n"
+        '  "nom": "Full name",\n'
+        '  "role_principal": "Main role/title",\n'
+        '  "seniorite_raw": "Raw seniority phrasing if present (e.g., Senior Data Engineer, 5 years, etc.)",\n'
+        '  "seniorite_label": "One of: Junior | Senior | Manager | null (ONLY if you are confident)",\n'
+        '  "secteur_principal": "Main industry sector(s), comma-separated",\n'
+        '  "tech_skills": ["TECH skills/tools/languages/frameworks/platforms"],\n'
+        '  "domain_knowledge": ["Domain knowledge / industry keywords (banking, insurance, public, retail...)"],\n'
+        '  "certifications": ["Certifications (Salesforce, AWS, Azure, PMP, etc.)"],\n'
+        '  "langues": ["Languages"],\n'
+        '  "experiences": [\n'
+        "     {\n"
+        '       "mission": "Short mission title/summary",\n'
+        '       "secteur": "Domain/industry if stated",\n'
+        '       "stack": ["Tech stack used"],\n'
+        '       "duree": "Duration if stated"\n'
+        "     }\n"
+        "  ],\n"
+        '  "cv_text": "A compact text summary focusing on responsibilities + achievements (no fluff)"\n'
+        "}\n\n"
+        "Rules:\n"
+        "- Do NOT invent facts.\n"
+        "- Avoid soft skills unless they are extremely specific and demonstrable.\n"
+        "- Prefer lists of concrete nouns/proper names/technologies.\n"
+    )
 
-def extract_keyword_pack(text: str):
+
+def build_ao_keyword_pack_prompt() -> str:
+    return (
+        "Extract a CLEAN 'keyword pack' from the provided job description / call for tender (AO). "
+        "Translate everything to English.\n"
+        "Output a single JSON object. If a field is not found, use null (or [] for lists).\n\n"
+        "{\n"
+        '  "titre_poste": "Mission title / role",\n'
+        '  "mission_summary": "1-3 sentences of mission objective + context (no fluff)",\n'
+        '  "tech_skills_required": ["Required technical skills/tools/platforms"],\n'
+        '  "domain_knowledge_required": ["Required domain/industry knowledge"],\n'
+        '  "certifications_required": ["Required or strongly preferred certifications"],\n'
+        '  "experience_required": "Years / level required if stated",\n'
+        '  "seniority_target": "One of: Junior | Senior | Manager | null (ONLY if explicit)",\n'
+        '  "nice_to_have": ["Nice-to-have skills (technical or domain)"],\n'
+        '  "constraints": ["Hard constraints: language, on-site, clearance, etc."]\n'
+        "}\n\n"
+        "Rules:\n"
+        "- Do NOT invent requirements.\n"
+        "- Keep lists concrete and deduplicated.\n"
+    )
+
+
+def call_mistral_cv_keyword_pack(
+    cv_text: str,
+    mistral_model: str = DEFAULT_MODEL,
+) -> Dict[str, Any]:
+    return call_mistral_json_extraction(
+        text_input=cv_text,
+        user_prompt=build_cv_keyword_pack_prompt(),
+        mistral_model=mistral_model,
+    )
+
+
+def call_mistral_ao_keyword_pack(
+    ao_text: str,
+    mistral_model: str = DEFAULT_MODEL,
+) -> Dict[str, Any]:
+    return call_mistral_json_extraction(
+        text_input=ao_text,
+        user_prompt=build_ao_keyword_pack_prompt(),
+        mistral_model=mistral_model,
+    )
+
+
+# ============================================================
+# Structured explanation + "Perfect candidate gaps"
+# ============================================================
+def call_mistral_json_explanation(
+    ao_pack: Dict[str, Any],
+    cv_pack: Dict[str, Any],
+    scores: Dict[str, Any],
+    mistral_model: str = DEFAULT_MODEL,
+) -> Dict[str, Any]:
+    """
+    Produce a structured explanation (JSON) of why a CV matches an AO.
+    Adds query_terms so we can do vector-search citations.
+    """
+    client = _get_client()
 
     prompt = f"""
-Extract structured keywords from the following text.
+You are a staffing assistant for consulting proposals.
+Explain WHY a candidate matches (or not) a job description, based ONLY on the provided inputs.
 
-Return JSON only:
-
+Return ONLY valid JSON with this schema:
 {{
-  "tech_skills": ["..."],
-  "domain_knowledge": ["..."],
-  "experience_summary": "... concise professional summary ...",
-  "certifications": ["..."],
-  "seniority": "Junior | Senior | Manager"
+  "verdict": "Strong Fit | Moderate Fit | Low Fit",
+  "one_liner": "1 sentence summary",
+  "strengths": [
+    {{
+      "title": "short label",
+      "evidence": "what in CV matches AO (be specific)",
+      "impact": "why it matters",
+      "query_terms": ["terms to retrieve supporting CV passages (2-6 items)"]
+    }}
+  ],
+  "gaps": [
+    {{
+      "title": "short label",
+      "evidence": "what is missing/unclear compared to AO",
+      "risk": "why it matters",
+      "mitigation": "how to reduce risk",
+      "query_terms": ["terms to verify in CV (2-6 items)"]
+    }}
+  ],
+  "recommended_questions": [
+    "question to ask candidate"
+  ],
+  "score_breakdown": {{
+    "tech_skills": "what drove the score",
+    "experience": "what drove the score",
+    "domain_knowledge": "what drove the score",
+    "certifications": "what drove the score"
+  }}
 }}
 
-Rules:
-- Do not invent.
-- If unclear, use empty list.
-- Keep concise.
-- Focus only on relevant professional content.
+AO_PACK:
+{json.dumps(ao_pack, ensure_ascii=False)}
 
-TEXT:
-{text}
+CV_PACK:
+{json.dumps(cv_pack, ensure_ascii=False)}
+
+SCORES:
+{json.dumps(scores, ensure_ascii=False)}
+
+Rules:
+- Do NOT invent facts not present in AO_PACK or CV_PACK.
+- If unclear, explicitly say "unclear" and add a recommended question.
+- query_terms must be concrete (tech names, domain keywords, certification names, client/industry terms).
 """
 
-    return call_mistral(prompt)
+    messages = [
+        {"role": "system", "content": "You output ONLY valid JSON. No markdown. No commentary."},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        chat_response = client.chat.complete(
+            model=mistral_model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+        response_content = chat_response.choices[0].message.content
+        return json.loads(response_content)
+    except json.JSONDecodeError as e:
+        return {"error": f"JSON parse error: {e}"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
-# ============================================================
-# 2) GAP TO IDEAL
-# ============================================================
-
-def gap_to_ideal(cv_keywords, ao_keywords):
+def call_mistral_json_gap_to_ideal(
+    ao_pack: Dict[str, Any],
+    cv_pack: Dict[str, Any],
+    mistral_model: str = DEFAULT_MODEL,
+) -> Dict[str, Any]:
+    """
+    Compare CV to an 'ideal' candidate implied by the AO.
+    Output is action-oriented and NOT a one-liner.
+    """
+    client = _get_client()
 
     prompt = f"""
-You are a senior staffing analyst.
-
-Compare the candidate to the ideal profile derived from the job offer.
-
-Return structured JSON:
+You are a staffing assistant. Build an "ideal candidate profile" from the AO, then compare the CV against it.
+Return ONLY valid JSON with this schema:
 
 {{
-  "must_have_missing": [...],
-  "nice_to_have_missing": [...],
-  "unclear_elements": [...],
-  "risk_analysis": "...",
-  "questions_to_validate": [...]
+  "ideal_profile": {{
+    "tech_skills": ["must-have technical skills implied by AO"],
+    "domain_knowledge": ["must-have domain knowledge implied by AO"],
+    "certifications": ["must-have or strongly preferred certifications"],
+    "experience": "what type/level of experience would be ideal",
+    "seniority_target": "Junior | Senior | Manager | Unknown"
+  }},
+  "must_have_missing": [
+    {{
+      "item": "missing requirement",
+      "why_important": "impact on mission delivery",
+      "how_to_close": "realistic mitigation (training, pairing, interview check...)",
+      "query_terms": ["terms to verify in CV (2-6 items)"]
+    }}
+  ],
+  "nice_to_have_missing": [
+    {{
+      "item": "nice-to-have gap",
+      "value": "why it would help",
+      "query_terms": ["terms to verify in CV (2-6 items)"]
+    }}
+  ],
+  "unclear": [
+    {{
+      "item": "could be present but not explicit in CV",
+      "what_to_ask": "question to validate",
+      "query_terms": ["terms to search in CV (2-6 items)"]
+    }}
+  ],
+  "top_questions": [
+    "best questions to validate the gaps quickly"
+  ]
 }}
 
+AO_PACK:
+{json.dumps(ao_pack, ensure_ascii=False)}
+
+CV_PACK:
+{json.dumps(cv_pack, ensure_ascii=False)}
+
 Rules:
-- No hallucination.
-- If not in CV → mark missing or unclear.
-- Be analytical, not generic.
-
-CV:
-{cv_keywords}
-
-JOB OFFER:
-{ao_keywords}
+- Do NOT invent facts.
+- If CV does not explicitly mention something, treat it as missing or unclear.
+- Keep items concrete and mission-relevant (avoid generic soft skills).
 """
 
-    return call_mistral(prompt)
+    messages = [
+        {"role": "system", "content": "You output ONLY valid JSON. No markdown. No commentary."},
+        {"role": "user", "content": prompt},
+    ]
 
-
-# ============================================================
-# 3) EXPLANATION POST-SCORING
-# ============================================================
-
-def explain_scoring(cv_keywords, ao_keywords, block_scores):
-
-    prompt = f"""
-Explain why the candidate matches or not the job offer.
-
-Block scores:
-{block_scores}
-
-CV keywords:
-{cv_keywords}
-
-AO keywords:
-{ao_keywords}
-
-Provide structured analysis:
-- Strengths
-- Weaknesses
-- Overall fit assessment
-- Hiring recommendation
-
-Be precise and business-oriented.
-"""
-
-    return call_mistral(prompt)
+    try:
+        chat_response = client.chat.complete(
+            model=mistral_model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+        response_content = chat_response.choices[0].message.content
+        return json.loads(response_content)
+    except json.JSONDecodeError as e:
+        return {"error": f"JSON parse error: {e}"}
+    except Exception as e:
+        return {"error": str(e)}
