@@ -100,11 +100,13 @@ with tabs[0]:
 
             with st.expander(f"CV: {filename}", expanded=False):
                 with st.spinner("Extraction texte…"):
-                    text = extract_text_generic(filename=filename, file_bytes=raw_bytes)
+                    doc_type, text = extract_text_generic(filename=filename, file_bytes=raw_bytes)
+                    text = (text or "").strip()
 
-                if not text.strip():
+                if not text:
                     st.error("Extraction texte vide. (Pas d'OCR ici, demandé explicitement.)")
                     continue
+
 
                 extracted = {}
                 if use_mistral:
