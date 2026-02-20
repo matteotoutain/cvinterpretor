@@ -490,19 +490,27 @@ with tabs[1]:
 
 
 # ============================================================
-# TAB 3 — DB manage
+# TAB 3 — DB management
 # ============================================================
 with tabs[2]:
-    st.subheader("DB — Gérer les CVs (liste, suppression)")
+    st.subheader("Base locale — CVs stockés")
+    df_list = list_cvs(conn)
 
-    df = list_cvs(conn)
-    if df.empty:
+    # ✅ compat: ta DB expose "seniorite_label", pas "seniorite"
+    cols = ["cv_id", "filename", "nom", "role_principal", "seniorite_label"]
+    cols = [c for c in cols if c in df_list.columns]
+
+    if df_list.empty:
         st.info("DB vide.")
     else:
-        st.dataframe(df[["cv_id", "filename", "nom", "role_principal", "seniorite"]], use_container_width=True)
+        st.dataframe(df_list[cols], use_container_width=True)
 
         st.markdown("### Supprimer un CV")
-        to_del = st.selectbox("Choisir CV à supprimer", options=df["cv_id"].tolist(), format_func=lambda x: str(x)[:10] + "…")
-        if st.button("Supprimer"):
-            delete_cv(conn, to_del)
-            st.success("Supprimé. Recharge la page.")
+        choice = st.selectbox(
+            "Choisir un CV à supprimer",
+            df_list["cv_id"].tolist(),
+            format_func=lambda cid: df_list[df_list["cv_id"] == cid]["filename"].iloc[0],
+        )
+        if st.button("Supprimer", type="secondary"):
+            delete_cv(conn, choice)
+            st.success("Supprimé. Recharge la page si besoin.")
