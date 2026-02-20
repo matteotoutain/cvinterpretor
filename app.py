@@ -201,24 +201,54 @@ def _semantic_overlap_and_gaps(
     return overlap, missing
 
 
-def overlap_and_gaps(ao_pack: Dict[str, Any], cv_pack: Dict[str, Any]) -> Dict[str, List[str]]:
+def overlap_and_gaps(ao_pack: Dict[str, Any], cv_pack: Dict[str, Any], cv_text: str) -> Dict[str, List[str]]:
     """
-    Previous version was exact string set overlap (too tatillon).
-    Now: semantic overlap based on embeddings similarity (still deterministic, no hardcoded mapping).
+    Less tatillon + discriminant:
+    - We check AO terms against CV *text* using embedding search on chunks.
+    - No hardcoded dictionaries, just evidence-based semantic retrieval.
     Output schema unchanged.
     """
+    def _list_from_pack(pack: Dict[str, Any], key: str) -> List[str]:
+        x = pack.get(key)
+        if x is None:
+            return []
+        if isinstance(x, list):
+            items = x
+        else:
+            items = [p.strip() for p in str(x).split(",")]
+        out: List[str] = []
+        for it in items:
+            s = normalize_ws(str(it)).strip().lower()
+            if s:
+                out.append(s)
+        return out
+
+    def _evidence_present(term: str, threshold: float) -> bool:
+        hits, _ = vector_search_passages(term, cv_text, top_k=1)
+        if not hits:
+            return False
+        return float(hits[0]["score"]) >= threshold
+
     ao_tech = _list_from_pack(ao_pack, "tech_skills_required")
-    ao_dom = _list_from_pack(ao_pack, "domain_knowledge_required")
+    ao_dom  = _list_from_pack(ao_pack, "domain_knowledge_required")
     ao_cert = _list_from_pack(ao_pack, "certifications_required")
 
-    cv_tech = _list_from_pack(cv_pack, "tech_skills") + _list_from_pack(cv_pack, "technologies")
-    cv_dom = _list_from_pack(cv_pack, "domain_knowledge") + _list_from_pack(cv_pack, "secteur_principal")
-    cv_cert = _list_from_pack(cv_pack, "certifications")
+    # thresholds (category-level, not domain hardcode)
+    T_TECH = 0.62
+    T_DOM  = 0.55
+    T_CERT = 0.62
 
-    # Thresholds are category-level, not hardcoded per domain
-    over_tech, miss_tech = _semantic_overlap_and_gaps(ao_tech, cv_tech, threshold=0.58)
-    over_dom, miss_dom = _semantic_overlap_and_gaps(ao_dom, cv_dom, threshold=0.50)
-    over_cert, miss_cert = _semantic_overlap_and_gaps(ao_cert, cv_cert, threshold=0.60)
+    over_tech, miss_tech = [], []
+    for t in ao_tech:
+        (over_tech if _evidence_present(t, T_TECH) else miss_tech).append(t)
+
+    over_dom, miss_dom = [], []
+    for t in ao_dom:
+        (over_dom if _evidence_present(t, T_DOM) else miss_dom).append(t)
+
+    over_cert, miss_cert = [], []
+    for t in ao_cert:
+        (over_cert if _evidence_present(t, T_CERT) else miss_cert).append(t)
 
     return {
         "overlap_tech": sorted(over_tech),
@@ -457,7 +487,7 @@ with tabs[1]:
                         scores, method = score_blocks(ao_blocks, cv_blocks, weights=weights)
                         verdict = verdict_from_score(scores["global_score"])
 
-                        og = overlap_and_gaps(ao_pack if ao_pack else {}, cv_pack if cv_pack else {})
+                        og = overlap_and_gaps(ao_pack if ao_pack else {}, cv_pack if cv_pack else {}, cv_text=cv_text)
 
                         st.markdown('<div class="cv-card">', unsafe_allow_html=True)
                         left, mid, right = st.columns([1.55, 1.15, 1.30])
