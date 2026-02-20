@@ -443,11 +443,13 @@ with tabs[1]:
                     st.markdown("### Résultats (cards + radar + match/missing)")
                     top_k = min(10, len(out))
 
+                    df_full = get_cv_texts(conn)
+
                     for i in range(top_k):
                         row = out.iloc[i]
                         cv_id = row["cv_id"]
 
-                        full = df[df["cv_id"] == cv_id].iloc[0]
+                        full = df_full[df_full["cv_id"] == cv_id].iloc[0]
                         cv_text = full.get("cv_text") or ""
                         cv_pack = _safe_json_loads(full.get("cv_keywords_json")) or _safe_json_loads(full.get("cv_struct_json")) or {}
 
@@ -466,6 +468,7 @@ with tabs[1]:
                                 st.write(f"**{row['nom']}**")
                             if row.get("role_principal"):
                                 st.write(f"🧩 {row['role_principal']}")
+                            st.caption(f"DEBUG: cv_text_len={len(cv_text)} | pack_keys={len(cv_pack.keys())}")
 
                             st.markdown(
                                 f"""
