@@ -239,54 +239,108 @@ def pretty_list(xs: List[str], max_items: int = 10) -> str:
 
 
 # ============================================================
-# TAB 1 — Import CVs
+# TAB 1 — Import CVs (Batch)
 # ============================================================
 with tabs[0]:
     st.subheader("Étape 1 — Uploader des CVs (batch) → stockage en base locale (SQLite)")
-    st.write("Formats supportés : **.pptx**, **.pdf**, **.docx**, **.txt**. (Pas d’OCR ici.)")
+    st.write("Formats supportés : .pptx, .pdf, .docx, .txt (pas d’OCR).")
 
     st.markdown("### Options d'extraction (Mistral)")
     use_mistral = st.checkbox(
         "Utiliser Mistral pour extraire un 'keyword pack' (tech, domaine, certifs, expériences…)",
         value=True,
     )
-    mistral_model = st.text_input("Modèle Mistral (CV)", value=DEFAULT_MODEL, disabled=not use_mistral)
+    mistral_model = st.text_input(
+        "Modèle Mistral (CV)",
+        value=DEFAULT_MODEL,
+        disabled=not use_mistral,
+    )
 
-    files = st.file_uploader("Dépose tes CVs ici", type=["pptx", "pdf", "docx", "txt"], accept_multiple_files=True)
-    do_extract = st.checkbox("Extraire + stocker maintenant", value=True)
+    files = st.file_uploader(
+        "Dépose tes CVs ici",
+        type=["pptx", "pdf", "docx", "txt"],
+        accept_multiple_files=True,
+    )
 
     if st.button("Lancer l'import batch"):
         if not files:
             st.warning("Aucun fichier.")
         else:
-            with st.spinner("Traitement…"):
+            with st.spinner("Traitement des CVs…"):
                 n_ok = 0
+
                 for f in files:
-                    raw = f.read()
-                    file_id = stable_id_from_bytes(raw)
-                    text = extract_text_generic(f.name, raw)
+                    try:
+                        # --------------------------------------------------
+                        # 1) Lire bytes
+                        # --------------------------------------------------
+                        raw_bytes = f.getvalue()
+                        filename = f.name
 
-                    cv_keywords = {}
-                    if use_mistral:
-                        cv_keywords = call_mistral_cv_keyword_pack(text, mistral_model=mistral_model) or {}
-                    senior_raw = str(cv_keywords.get("seniorite_raw") or cv_keywords.get("seniorite") or "")
-                    senior_label = cv_keywords.get("seniorite_label") or normalize_seniority_label(senior_raw)
+                        # --------------------------------------------------
+                        # 2) ID stable (basé uniquement sur le contenu)
+                        # --------------------------------------------------
+                        cv_id = stable_id_from_bytes(raw_bytes)
 
-                    upsert_cv(
-                        conn,
-                        cv_id=file_id,
-                        filename=f.name,
-                        cv_text=text,
-                        cv_struct_json=_safe_json_dumps(cv_keywords),
-                        cv_keywords_json=_safe_json_dumps(cv_keywords),
-                        nom=str(cv_keywords.get("nom") or ""),
-                        role_principal=str(cv_keywords.get("role_principal") or ""),
-                        seniorite=str(senior_label or "Unknown"),
-                    )
-                    n_ok += 1
+                        # --------------------------------------------------
+                        # 3) Extraction texte
+                        # --------------------------------------------------
+                        doc_type, text = extract_text_generic(
+                            filename=filename,
+                            file_bytes=raw_bytes,
+                        )
 
-            st.success(f"Import OK: {n_ok} fichier(s).")
+                        # --------------------------------------------------
+                        # 4) Extraction Mistral (optionnel)
+                        # --------------------------------------------------
+                        cv_keywords = {}
+                        if use_mistral:
+                            cv_keywords = call_mistral_cv_keyword_pack(
+                                text,
+                                mistral_model=mistral_model,
+                            ) or {}
 
+                        # --------------------------------------------------
+                        # 5) Seniority normalisée
+                        # --------------------------------------------------
+                        senior_raw = str(
+                            cv_keywords.get("seniorite_raw")
+                            or cv_keywords.get("seniorite")
+                            or ""
+                        )
+
+                        senior_label = (
+                            cv_keywords.get("seniorite_label")
+                            or normalize_seniority_label(senior_raw)
+                        )
+
+                        # --------------------------------------------------
+                        # 6) Construction ligne DB
+                        # --------------------------------------------------
+                        row = {
+                            "cv_id": cv_id,
+                            "filename": filename,
+                            "doc_type": doc_type,
+                            "cv_text": text,
+                            "cv_struct_json": _safe_json_dumps(cv_keywords),
+                            "cv_keywords_json": _safe_json_dumps(cv_keywords),
+                            "nom": str(cv_keywords.get("nom") or ""),
+                            "role_principal": str(cv_keywords.get("role_principal") or ""),
+                            "seniorite_label": str(senior_label or "Unknown"),
+                            "seniorite_raw": senior_raw,
+                        }
+
+                        # --------------------------------------------------
+                        # 7) Upsert DB
+                        # --------------------------------------------------
+                        upsert_cv(conn, row)
+
+                        n_ok += 1
+
+                    except Exception as e:
+                        st.error(f"Erreur sur {f.name} : {e}")
+
+                st.success(f"Import terminé : {n_ok} CV(s) ajouté(s) / mis à jour.")
 
 # ============================================================
 # TAB 2 — Import AO & Analyse
