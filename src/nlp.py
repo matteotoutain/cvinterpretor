@@ -47,7 +47,20 @@ def normalize_seniority_label(raw: str) -> str:
         return "Unknown"
 
     # Manager-ish keywords
-    if any(k in s for k in ["manager", "lead", "head", "director", "principal", "partner", "responsable", "chef de", "team lead"]):
+    if any(
+        k in s
+        for k in [
+            "manager",
+            "lead",
+            "head",
+            "director",
+            "principal",
+            "partner",
+            "responsable",
+            "chef de",
+            "team lead",
+        ]
+    ):
         return "Manager"
 
     # Explicit senior / junior
@@ -78,8 +91,20 @@ def normalize_seniority_label(raw: str) -> str:
 # ============================================================
 # Embeddings / Similarity
 # ============================================================
+# BONUS: better multilingual embedder (FR/EN) + caching (faster + stable)
+_ST_MODEL: Optional["SentenceTransformer"] = None
+_ST_MODEL_NAME = "intfloat/multilingual-e5-base"
+
+
+def _get_st_model() -> "SentenceTransformer":
+    global _ST_MODEL
+    if _ST_MODEL is None:
+        _ST_MODEL = SentenceTransformer(_ST_MODEL_NAME)
+    return _ST_MODEL
+
+
 def _embed_sentence_transformers(texts: List[str]) -> np.ndarray:
-    model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    model = _get_st_model()
     emb = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
     return np.asarray(emb)
 
@@ -101,7 +126,7 @@ def compute_similarity(query_text: str, documents: List[str]) -> Tuple[np.ndarra
             q = emb[0:1]
             d = emb[1:]
             scores = cosine_similarity(q, d)[0]
-            return scores.astype(float), "sentence-transformers (all-MiniLM-L6-v2)"
+            return scores.astype(float), f"sentence-transformers ({_ST_MODEL_NAME})"
         except Exception:
             pass
 
@@ -199,13 +224,31 @@ def _normalize_weights(weights: Dict[str, float]) -> Dict[str, float]:
     return {k: max(v, 0.0) / s for k, v in w.items()}
 
 
+def _softmax_pool(scores: List[float], tau: float = 0.20) -> float:
+    """
+    Smooth max pooling:
+      - tau small -> closer to max
+      - tau large -> closer to mean
+    """
+    if not scores:
+        return 0.0
+    x = np.array(scores, dtype=float)
+    x = np.clip(x, 0.0, 1.0)
+    m = float(x.max())
+    ex = np.exp((x - m) / max(tau, 1e-6))
+    return float((ex * x).sum() / ex.sum())
+
+
 def score_blocks(
     ao_blocks: Dict[str, str],
     cv_blocks: Dict[str, str],
     weights: Optional[Dict[str, float]] = None,
 ) -> Tuple[Dict[str, float], str]:
     """
-    Compute similarity per block and weighted global score.
+    Less-tatillon scoring (NO hardcode of industries/keywords):
+    - For each AO block, compare against multiple CV evidences (not only the matching block).
+    - Pool with smooth-max so a single strong evidence is enough.
+    - Keep the same output schema as before.
     """
     if weights is None:
         weights = {k: 1.0 / len(BLOCK_KEYS) for k in BLOCK_KEYS}
@@ -214,12 +257,32 @@ def score_blocks(
     method_used = None
     per_block: Dict[str, float] = {}
 
+    # Structural pooling only (not domain-specific rules)
+    evidence_map = {
+        "tech_skills": ["tech_skills", "experience", "full"],
+        "experience": ["experience", "full"],
+        "domain_knowledge": ["domain_knowledge", "experience", "full"],
+        "certifications": ["certifications", "full"],
+    }
+
     for k in BLOCK_KEYS:
         q = ao_blocks.get(k, "") or ""
-        d = cv_blocks.get(k, "") or ""
-        scores, method = compute_similarity(q, [d])
+
+        candidates: List[str] = []
+        for cv_key in evidence_map.get(k, [k, "full"]):
+            txt = cv_blocks.get(cv_key, "") or ""
+            if txt.strip():
+                candidates.append(txt)
+
+        if not candidates:
+            per_block[k] = 0.0
+            continue
+
+        scores, method = compute_similarity(q, candidates)
         method_used = method
-        per_block[k] = float(scores[0])
+
+        pooled = _softmax_pool(scores.tolist(), tau=0.20)
+        per_block[k] = float(pooled)
 
     global_score = 0.0
     for k, w in weights.items():
