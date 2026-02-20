@@ -263,7 +263,7 @@ with tabs[0]:
                 n_ok = 0
                 for f in files:
                     raw = f.read()
-                    file_id = stable_id_from_bytes(raw, f.name)
+                    file_id = stable_id_from_bytes(raw)
                     text = extract_text_generic(f.name, raw)
 
                     cv_keywords = {}
