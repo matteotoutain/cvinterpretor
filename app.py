@@ -425,7 +425,7 @@ with tabs[1]:
 
                         with mid:
                             fig = radar_plot(scores, title="Match par bloc")
-                            st.plotly_chart(fig, use_container_width=True)
+                            st.plotly_chart(fig, use_container_width=True, key=f"radar_{cv_id}")
 
                         with right:
                             st.markdown("**Ce qui colle**")
