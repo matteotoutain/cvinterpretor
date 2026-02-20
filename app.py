@@ -264,7 +264,7 @@ with tabs[0]:
                 for f in files:
                     raw = f.read()
                     file_id = stable_id_from_bytes(raw, f.name)
-                    text = extract_text_generic(raw, f.name)
+                    text = extract_text_generic(f.name, raw)
 
                     cv_keywords = {}
                     if use_mistral:
@@ -320,7 +320,7 @@ with tabs[1]:
             st.warning("Aucun AO.")
         else:
             raw = ao_file.read()
-            ao_text = extract_text_generic(raw, ao_file.name)
+            ao_text = extract_text_generic(ao_file.name, raw)
 
             ao_pack = {}
             if use_mistral_ao:
