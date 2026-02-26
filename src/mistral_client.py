@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from mistralai import Mistral
 from dotenv import load_dotenv
@@ -85,7 +85,7 @@ Return ONLY valid JSON with this schema:
     "skills_like": "explain which blocks drove the score",
     "experience_like": "explain which blocks drove the score",
     "domain_like": "explain which blocks drove the score",
-    "certification_like": "explain which blocks drove the score"
+    "certification_like": "explain certifications/certification signals driving the score"
   }}
 }}
 
