@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import json
+import math
 import plotly.graph_objects as go
 from typing import Any, Dict, List, Tuple
 
@@ -14,8 +15,6 @@ from src.nlp import (
     verdict_from_score,
     normalize_seniority_label,
     vector_search_passages,
-    compute_similarity,
-    normalize_ws,
 )
 
 from src.mistral_client import (
@@ -27,7 +26,7 @@ from src.mistral_client import (
 )
 
 # ============================================================
-# UI Style
+# UI Style (simple + clean)
 # ============================================================
 st.set_page_config(page_title=APP_NAME, layout="wide")
 st.markdown(
@@ -69,6 +68,14 @@ tabs = st.tabs(["1) Import CVs (Batch)", "2) Import AO & Analyse (Ponctuel)", "D
 # ============================================================
 # Helpers
 # ============================================================
+def _csv_join(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, list):
+        return ", ".join([str(i).strip() for i in x if str(i).strip()])
+    return str(x).strip()
+
+
 def _safe_json_dumps(obj: Any) -> str:
     try:
         return json.dumps(obj, ensure_ascii=False)
@@ -130,59 +137,38 @@ def radar_plot(scores: Dict[str, Any], title: str = ""):
     return fig
 
 
-def _list_from_pack(pack: Dict[str, Any], key: str) -> List[str]:
+def set_from_pack(pack: Dict[str, Any], key: str) -> set:
     x = pack.get(key)
     if x is None:
-        return []
+        return set()
     if isinstance(x, list):
         items = x
     else:
         items = [p.strip() for p in str(x).split(",")]
-    out: List[str] = []
+    out = set()
     for it in items:
-        s = normalize_ws(str(it)).strip().lower()
+        s = str(it).strip().lower()
         if s:
-            out.append(s)
+            out.add(s)
     return out
 
 
-def overlap_and_gaps(ao_pack: Dict[str, Any], cv_pack: Dict[str, Any], cv_text: str) -> Dict[str, List[str]]:
-    """
-    Evidence-based (per CV text) - discriminant.
-    """
-    def _evidence_present(term: str, threshold: float) -> bool:
-        hits, _ = vector_search_passages(term, cv_text, top_k=1)
-        if not hits:
-            return False
-        return float(hits[0]["score"]) >= threshold
+def overlap_and_gaps(ao_pack: Dict[str, Any], cv_pack: Dict[str, Any]) -> Dict[str, List[str]]:
+    ao_tech = set_from_pack(ao_pack, "tech_skills_required")
+    ao_dom = set_from_pack(ao_pack, "domain_knowledge_required")
+    ao_cert = set_from_pack(ao_pack, "certifications_required")
 
-    ao_tech = _list_from_pack(ao_pack, "tech_skills_required")
-    ao_dom = _list_from_pack(ao_pack, "domain_knowledge_required")
-    ao_cert = _list_from_pack(ao_pack, "certifications_required")
-
-    T_TECH = 0.62
-    T_DOM = 0.55
-    T_CERT = 0.62
-
-    over_tech, miss_tech = [], []
-    for t in ao_tech:
-        (over_tech if _evidence_present(t, T_TECH) else miss_tech).append(t)
-
-    over_dom, miss_dom = [], []
-    for t in ao_dom:
-        (over_dom if _evidence_present(t, T_DOM) else miss_dom).append(t)
-
-    over_cert, miss_cert = [], []
-    for t in ao_cert:
-        (over_cert if _evidence_present(t, T_CERT) else miss_cert).append(t)
+    cv_tech = set_from_pack(cv_pack, "tech_skills") | set_from_pack(cv_pack, "technologies")
+    cv_dom = set_from_pack(cv_pack, "domain_knowledge") | set_from_pack(cv_pack, "secteur_principal")
+    cv_cert = set_from_pack(cv_pack, "certifications")
 
     return {
-        "overlap_tech": sorted(over_tech),
-        "missing_tech": sorted(miss_tech),
-        "overlap_domain": sorted(over_dom),
-        "missing_domain": sorted(miss_dom),
-        "overlap_cert": sorted(over_cert),
-        "missing_cert": sorted(miss_cert),
+        "overlap_tech": sorted(list(ao_tech & cv_tech)),
+        "missing_tech": sorted(list(ao_tech - cv_tech)),
+        "overlap_domain": sorted(list(ao_dom & cv_dom)),
+        "missing_domain": sorted(list(ao_dom - cv_dom)),
+        "overlap_cert": sorted(list(ao_cert & cv_cert)),
+        "missing_cert": sorted(list(ao_cert - cv_cert)),
     }
 
 
@@ -195,319 +181,333 @@ def pretty_list(xs: List[str], max_items: int = 10) -> str:
 
 
 # ============================================================
-# TAB 1 — Import CVs (Batch)
+# TAB 1 — Import CVs
 # ============================================================
 with tabs[0]:
     st.subheader("Étape 1 — Uploader des CVs (batch) → stockage en base locale (SQLite)")
-    st.write("Formats supportés : .pptx, .pdf, .docx, .txt (pas d’OCR).")
+    st.write("Formats supportés : **.pptx**, **.pdf**, **.docx**, **.txt**. (Pas d’OCR ici.)")
 
     st.markdown("### Options d'extraction (Mistral)")
     use_mistral = st.checkbox(
         "Utiliser Mistral pour extraire un 'keyword pack' (tech, domaine, certifs, expériences…)",
         value=True,
     )
-    mistral_model = st.text_input(
-        "Modèle Mistral (CV)",
-        value=DEFAULT_MODEL,
-        disabled=not use_mistral,
-    )
+    mistral_model = st.text_input("Modèle Mistral (CV)", value=DEFAULT_MODEL, disabled=not use_mistral)
 
-    files = st.file_uploader(
-        "Dépose tes CVs ici",
-        type=["pptx", "pdf", "docx", "txt"],
-        accept_multiple_files=True,
-    )
+    files = st.file_uploader("Dépose tes CVs ici", type=["pptx", "pdf", "docx", "txt"], accept_multiple_files=True)
+    do_extract = st.checkbox("Extraire + stocker maintenant", value=True)
 
-    if st.button("Lancer l'import batch"):
-        if not files:
-            st.warning("Aucun fichier.")
-        else:
-            with st.spinner("Traitement des CVs…"):
-                n_ok = 0
+    if files and do_extract:
+        st.write(f"📦 {len(files)} fichier(s) reçu(s).")
 
-                for f in files:
-                    try:
-                        raw_bytes = f.getvalue()
-                        filename = f.name
+        for f in files:
+            raw_bytes = f.getvalue()
+            cv_id = stable_id_from_bytes(raw_bytes)
+            filename = f.name
 
-                        cv_id = stable_id_from_bytes(raw_bytes)
+            with st.expander(f"CV: {filename}", expanded=False):
+                with st.spinner("Extraction texte…"):
+                    doc_type, text = extract_text_generic(filename=filename, file_bytes=raw_bytes)
+                    text = (text or "").strip()
 
-                        doc_type, text = extract_text_generic(
-                            filename=filename,
-                            file_bytes=raw_bytes,
-                        )
+                if not text:
+                    st.error("Extraction texte vide. (Pas d'OCR ici.)")
+                    continue
 
-                        cv_keywords = {}
-                        if use_mistral:
-                            cv_keywords = call_mistral_cv_keyword_pack(
-                                text,
-                                mistral_model=mistral_model,
-                            ) or {}
+                extracted = {}
+                if use_mistral:
+                    with st.spinner("Mistral: keyword pack CV…"):
+                        extracted = call_mistral_cv_keyword_pack(cv_text=text, mistral_model=mistral_model)
+                    if extracted.get("error"):
+                        st.error(extracted["error"])
+                        extracted = {}
 
-                        senior_raw = str(cv_keywords.get("seniorite_raw") or cv_keywords.get("seniorite") or "")
-                        senior_label = cv_keywords.get("seniorite_label") or normalize_seniority_label(senior_raw)
+                nom = extracted.get("nom") if extracted else ""
+                role = extracted.get("role_principal") if extracted else ""
 
-                        row = {
-                            "cv_id": cv_id,
-                            "filename": filename,
-                            "doc_type": doc_type,
-                            "cv_text": text,
-                            "cv_struct_json": _safe_json_dumps(cv_keywords),
-                            "cv_keywords_json": _safe_json_dumps(cv_keywords),
-                            "nom": str(cv_keywords.get("nom") or ""),
-                            "role_principal": str(cv_keywords.get("role_principal") or ""),
-                            "seniorite_label": str(senior_label or "Unknown"),
-                            "seniorite_raw": senior_raw,
-                        }
+                senior_raw = extracted.get("seniorite_raw") or extracted.get("seniorite") or ""
+                senior_label = extracted.get("seniorite_label") or normalize_seniority_label(str(senior_raw))
 
-                        upsert_cv(conn, row)
-                        n_ok += 1
+                row = {
+                    "cv_id": cv_id,
+                    "filename": filename,
+                    "nom": nom or "",
+                    "role_principal": role or "",
+                    "seniorite_raw": str(senior_raw or ""),
+                    "seniorite_label": str(senior_label or "Unknown"),
+                    "secteur_principal": extracted.get("secteur_principal") or "",
+                    "tech_skills": _csv_join(extracted.get("tech_skills") or []),
+                    "domain_knowledge": _csv_join(extracted.get("domain_knowledge") or []),
+                    "certifications": _csv_join(extracted.get("certifications") or []),
+                    # legacy
+                    "technologies": _csv_join(extracted.get("technologies") or extracted.get("hard_skills") or []),
+                    "langues": _csv_join(extracted.get("langues") or []),
+                    "cv_text": text,
+                    "cv_struct_json": _safe_json_dumps(extracted) if extracted else "",
+                    "cv_keywords_json": _safe_json_dumps(extracted) if extracted else "",
+                }
 
-                    except Exception as e:
-                        st.error(f"Erreur sur {f.name} : {e}")
+                upsert_cv(conn, row)
 
-                st.success(f"Import terminé : {n_ok} CV(s) ajouté(s) / mis à jour.")
+                st.success("✅ Stocké en DB")
+                st.write(
+                    {
+                        "nom": row["nom"],
+                        "role_principal": row["role_principal"],
+                        "seniorite_label": row["seniorite_label"],
+                        "tech_skills": (row["tech_skills"][:200] + ("…" if len(row["tech_skills"]) > 200 else "")),
+                        "domain_knowledge": (row["domain_knowledge"][:200] + ("…" if len(row["domain_knowledge"]) > 200 else "")),
+                        "certifications": (row["certifications"][:200] + ("…" if len(row["certifications"]) > 200 else "")),
+                    }
+                )
 
 
 # ============================================================
-# TAB 2 — Import AO & Analyse
+# TAB 2 — AO & Analyse
 # ============================================================
 with tabs[1]:
-    st.subheader("Étape 2 — Uploader un AO et scorer les CVs (ponctuel)")
-    st.write("Tu importes un **AO** → extraction → (optionnel) Mistral pack AO → matching vs DB.")
+    st.subheader("Étape 2 — Import AO → scoring + explications + radar + citations (sans stocker l'AO)")
 
-    st.markdown("### 2.1 Import AO")
-    use_mistral_ao = st.checkbox("Utiliser Mistral pour extraire un 'keyword pack' AO", value=True)
+    st.markdown("### AO input")
+    use_mistral_ao = st.checkbox("Utiliser Mistral pour nettoyer l'AO en 'keyword pack'", value=True)
     mistral_model_ao = st.text_input("Modèle Mistral (AO)", value=DEFAULT_MODEL, disabled=not use_mistral_ao)
 
-    ao_file = st.file_uploader("AO (pdf/docx/txt/pptx)", type=["pptx", "pdf", "docx", "txt"], accept_multiple_files=False)
+    ao_file = st.file_uploader("Dépose ton AO ici", type=["pdf", "docx", "txt", "pptx"], accept_multiple_files=False)
 
-    st.markdown("### 2.2 Filtres & pondérations")
-    selected_terms = st.text_input("Filtre mots-clés (optionnel, séparés par virgule)", value="")
-    terms = [t.strip() for t in selected_terms.split(",") if t.strip()]
+    ao_text = ""
+    if ao_file:
+        ao_type, ao_text = extract_text_generic(filename=ao_file.name, file_bytes=ao_file.getvalue())
+        ao_text = (ao_text or "").strip()
 
-    colA, colB, colC, colD = st.columns(4)
-    w_tech = colA.slider("Poids Tech", 0.0, 1.0, 0.35, 0.05)
-    w_exp = colB.slider("Poids Experience", 0.0, 1.0, 0.35, 0.05)
-    w_dom = colC.slider("Poids Domain", 0.0, 1.0, 0.20, 0.05)
-    w_cert = colD.slider("Poids Certifs", 0.0, 1.0, 0.10, 0.05)
+    ao_pack: Dict[str, Any] = {}
+    if ao_text and use_mistral_ao:
+        with st.spinner("Mistral: keyword pack AO…"):
+            ao_pack = call_mistral_ao_keyword_pack(ao_text=ao_text, mistral_model=mistral_model_ao)
+        if ao_pack.get("error"):
+            st.error(ao_pack["error"])
+            ao_pack = {}
+
+    st.markdown("### Pondération des blocs (user-driven)")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        w_tech = st.slider("Tech skills", 0.0, 1.0, 0.35, 0.05)
+    with c2:
+        w_exp = st.slider("Experience", 0.0, 1.0, 0.30, 0.05)
+    with c3:
+        w_dom = st.slider("Domain knowledge", 0.0, 1.0, 0.25, 0.05)
+    with c4:
+        w_cert = st.slider("Certifications", 0.0, 1.0, 0.10, 0.05)
+
     weights = {"tech_skills": w_tech, "experience": w_exp, "domain_knowledge": w_dom, "certifications": w_cert}
 
-    if st.button("Lancer l'analyse"):
-        if not ao_file:
-            st.warning("Aucun AO.")
+    st.markdown("### Filtres (après scoring)")
+    senior_filter = st.multiselect(
+        "Séniorité",
+        ["Junior", "Senior", "Manager", "Unknown"],
+        default=["Junior", "Senior", "Manager", "Unknown"],
+    )
+
+    ao_skill_suggestions: List[str] = []
+    if ao_pack:
+        ao_skill_suggestions = list(dict.fromkeys((ao_pack.get("tech_skills_required") or []) + (ao_pack.get("domain_knowledge_required") or [])))
+
+    selected_terms = st.multiselect(
+        "Filtrer sur compétences/domaines (le candidat doit contenir TOUS les termes)",
+        ao_skill_suggestions,
+        default=[],
+    )
+
+    run = st.button("Lancer l'analyse", type="primary", disabled=not bool(ao_text))
+
+    if run:
+        df = get_cv_texts(conn)
+        if df.empty:
+            st.warning("Aucun CV en base. Va d'abord dans l'onglet 1.")
         else:
-            raw = ao_file.read()
-            ao_doc_type, ao_text = extract_text_generic(filename=ao_file.name, file_bytes=raw)
-
-            ao_pack = {}
-            if use_mistral_ao:
-                with st.spinner("Mistral: extraction AO pack…"):
-                    ao_pack = call_mistral_ao_keyword_pack(ao_text, mistral_model=mistral_model_ao) or {}
-
             ao_blocks = build_ao_blocks(ao_pack if ao_pack else {}, ao_fallback_text=ao_text)
 
-            # IMPORTANT: use get_cv_texts so we have cv_text + json packs
-            df_full = get_cv_texts(conn)
-            if df_full.empty:
-                st.warning("DB vide. Importe des CVs d'abord.")
+            rows: List[Dict[str, Any]] = []
+            for _, r in df.iterrows():
+                cv_text = r.get("cv_text") or ""
+                cv_pack = _safe_json_loads(r.get("cv_keywords_json")) or _safe_json_loads(r.get("cv_struct_json")) or {}
+                if not cv_pack:
+                    cv_pack = {
+                        "role_principal": r.get("role_principal") or "",
+                        "technologies": r.get("technologies") or "",
+                        "secteur_principal": r.get("secteur_principal") or "",
+                        "certifications": r.get("certifications") or "",
+                    }
+
+                cv_blocks = build_cv_blocks(cv_pack, cv_fallback_text=cv_text)
+                scores, method = score_blocks(ao_blocks, cv_blocks, weights=weights)
+
+                senior_label = r.get("seniorite_label") or normalize_seniority_label(str(r.get("seniorite_raw") or "")) or "Unknown"
+                if senior_label not in senior_filter:
+                    continue
+
+                if selected_terms:
+                    hay = " ".join(
+                        [
+                            str(r.get("tech_skills") or ""),
+                            str(r.get("domain_knowledge") or ""),
+                            str(r.get("certifications") or ""),
+                            str(r.get("technologies") or ""),
+                            str(r.get("secteur_principal") or ""),
+                            str(r.get("role_principal") or ""),
+                            str(cv_text[:1200] or ""),
+                        ]
+                    )
+                    if not _contains_all_terms(hay, selected_terms):
+                        continue
+
+                rows.append(
+                    {
+                        "cv_id": r["cv_id"],
+                        "filename": r["filename"],
+                        "nom": r.get("nom") or "",
+                        "role_principal": r.get("role_principal") or "",
+                        "seniorite": senior_label,
+                        "score_global": scores["global_score"],
+                        "tech_skills": scores.get("tech_skills", 0.0),
+                        "experience": scores.get("experience", 0.0),
+                        "domain_knowledge": scores.get("domain_knowledge", 0.0),
+                        "certifications": scores.get("certifications", 0.0),
+                        "method": method,
+                    }
+                )
+
+            if not rows:
+                st.warning("Aucun candidat ne passe les filtres (ou DB vide).")
             else:
-                rows = []
-                for _, r in df_full.iterrows():
-                    cv_text = r.get("cv_text") or ""
-                    cv_pack = _safe_json_loads(r.get("cv_keywords_json")) or _safe_json_loads(r.get("cv_struct_json")) or {}
+                out = pd.DataFrame(rows).sort_values("score_global", ascending=False).reset_index(drop=True)
+
+                st.info(f"{len(out)} candidat(s) après filtres — affichage Top {min(10, len(out))}.")
+
+                # Keep the dataframe (useful for debugging / export)
+                with st.expander("Table brute (debug)", expanded=False):
+                    st.dataframe(out, use_container_width=True)
+
+                st.markdown("### Résultats (cards + radar + match/missing)")
+                top_k = min(10, len(out))
+
+                for i in range(top_k):
+                    row = out.iloc[i]
+                    cv_id = row["cv_id"]
+
+                    full = df[df["cv_id"] == cv_id].iloc[0]
+                    cv_text = full.get("cv_text") or ""
+                    cv_pack = _safe_json_loads(full.get("cv_keywords_json")) or _safe_json_loads(full.get("cv_struct_json")) or {}
 
                     cv_blocks = build_cv_blocks(cv_pack, cv_fallback_text=cv_text)
+                    scores, method = score_blocks(ao_blocks, cv_blocks, weights=weights)
+                    verdict = verdict_from_score(scores["global_score"])
 
-                    scores, method = score_blocks(
-                        ao_blocks,
-                        cv_blocks,
-                        weights=weights,
-                        ao_pack=ao_pack if ao_pack else None,
-                        cv_text=cv_text,
-                    )
+                    og = overlap_and_gaps(ao_pack if ao_pack else {}, cv_pack if cv_pack else {})
 
-                    senior_label = str(r.get("seniorite_label") or "Unknown")
+                    st.markdown('<div class="cv-card">', unsafe_allow_html=True)
+                    left, mid, right = st.columns([1.55, 1.15, 1.30])
 
-                    if terms:
-                        hay = " ".join(
-                            [
-                                str(r.get("nom") or ""),
-                                str(r.get("role_principal") or ""),
-                                str(cv_text[:1500] or ""),
-                            ]
+                    with left:
+                        st.subheader(f"#{i+1} — {row['filename']}")
+                        if row.get("nom"):
+                            st.write(f"**{row['nom']}**")
+                        if row.get("role_principal"):
+                            st.write(f"🧩 {row['role_principal']}")
+
+                        st.markdown(
+                            f"""
+                            <span class="pill">Seniority: {row.get('seniorite','Unknown')}</span>
+                            <span class="pill">Verdict: {verdict}</span>
+                            <span class="pill">Method: {method}</span>
+                            """,
+                            unsafe_allow_html=True,
                         )
-                        if not _contains_all_terms(hay, terms):
-                            continue
+                        st.metric("Score global", f"{scores['global_score']:.3f}")
 
-                    rows.append(
-                        {
-                            "cv_id": r["cv_id"],
-                            "filename": r["filename"],
-                            "nom": r.get("nom") or "",
-                            "role_principal": r.get("role_principal") or "",
-                            "seniorite": senior_label,
-                            "score_global": scores["global_score"],
-                            "tech_skills": scores.get("tech_skills", 0.0),
-                            "experience": scores.get("experience", 0.0),
-                            "domain_knowledge": scores.get("domain_knowledge", 0.0),
-                            "certifications": scores.get("certifications", 0.0),
-                            "method": method,
-                            "cov_tech": (scores.get("coverage") or {}).get("tech", None),
-                            "cov_domain": (scores.get("coverage") or {}).get("domain", None),
-                            "cov_cert": (scores.get("coverage") or {}).get("cert", None),
-                        }
-                    )
+                    with mid:
+                        fig = radar_plot(scores, title="Match par bloc")
+                        st.plotly_chart(fig, use_container_width=True)
 
-                if not rows:
-                    st.warning("Aucun candidat ne passe les filtres (ou DB vide).")
-                else:
-                    out = pd.DataFrame(rows).sort_values("score_global", ascending=False).reset_index(drop=True)
+                    with right:
+                        st.markdown("**Ce qui colle**")
+                        st.write(f"- Tech: {pretty_list(og['overlap_tech'])}")
+                        st.write(f"- Domain: {pretty_list(og['overlap_domain'])}")
+                        st.write(f"- Certifs: {pretty_list(og['overlap_cert'])}")
 
-                    st.info(f"{len(out)} candidat(s) après filtres — affichage Top {min(10, len(out))}.")
+                        st.markdown("**Ce qui manque**")
+                        st.write(f"- Tech: {pretty_list(og['missing_tech'])}")
+                        st.write(f"- Domain: {pretty_list(og['missing_domain'])}")
+                        st.write(f"- Certifs: {pretty_list(og['missing_cert'])}")
 
-                    with st.expander("Table brute (debug)", expanded=False):
-                        st.dataframe(out, use_container_width=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
 
-                    st.markdown("### Résultats (cards + radar + match/missing)")
-                    top_k = min(10, len(out))
+                    with st.expander("Détails (justification + citations + gaps vs idéal)", expanded=False):
+                        colX, colY = st.columns(2)
+                        do_explain = colX.button("Générer justification (match)", key=f"explain_{cv_id}")
+                        do_gaps = colY.button("Générer manques vs idéal", key=f"gaps_{cv_id}")
 
-                    for i in range(top_k):
-                        row = out.iloc[i]
-                        cv_id = row["cv_id"]
-
-                        full = df_full[df_full["cv_id"] == cv_id].iloc[0]
-                        cv_text = full.get("cv_text") or ""
-                        cv_pack = _safe_json_loads(full.get("cv_keywords_json")) or _safe_json_loads(full.get("cv_struct_json")) or {}
-
-                        cv_blocks = build_cv_blocks(cv_pack, cv_fallback_text=cv_text)
-
-                        scores, method = score_blocks(
-                            ao_blocks,
-                            cv_blocks,
-                            weights=weights,
-                            ao_pack=ao_pack if ao_pack else None,
-                            cv_text=cv_text,
-                        )
-                        verdict = verdict_from_score(scores["global_score"])
-
-                        og = overlap_and_gaps(ao_pack if ao_pack else {}, cv_pack if cv_pack else {}, cv_text=cv_text)
-
-                        st.markdown('<div class="cv-card">', unsafe_allow_html=True)
-                        left, mid, right = st.columns([1.55, 1.15, 1.30])
-
-                        with left:
-                            st.subheader(f"#{i+1} — {row['filename']}")
-                            if row.get("nom"):
-                                st.write(f"**{row['nom']}**")
-                            if row.get("role_principal"):
-                                st.write(f"🧩 {row['role_principal']}")
-
-                            cov = scores.get("coverage")
-                            if isinstance(cov, dict):
-                                st.caption(
-                                    f"Coverage — Tech:{cov.get('tech',0):.2f} | Domain:{cov.get('domain',0):.2f} | Cert:{cov.get('cert',0):.2f}"
+                        if do_explain:
+                            with st.spinner("Mistral: justification…"):
+                                expl = call_mistral_json_explanation(
+                                    ao_pack=ao_pack if ao_pack else {},
+                                    cv_pack=cv_pack if cv_pack else {},
+                                    scores=scores,
+                                    mistral_model=mistral_model_ao,
                                 )
+                            if expl.get("error"):
+                                st.error(expl["error"])
+                            else:
+                                st.json(expl)
 
-                            st.markdown(
-                                f"""
-                                <span class="pill">Seniority: {row.get('seniorite','Unknown')}</span>
-                                <span class="pill">Verdict: {verdict}</span>
-                                <span class="pill">Method: {method}</span>
-                                """,
-                                unsafe_allow_html=True,
-                            )
-                            st.metric("Score global", f"{scores['global_score']:.3f}")
-                            st.caption(f"Semantic={scores.get('semantic_global',0):.3f} | Gate={((scores.get('coverage') or {}).get('gate',1.0)):.2f}")
+                                st.markdown("#### Citations (preuves dans le CV)")
+                                for section_key in ["strengths", "gaps"]:
+                                    items = expl.get(section_key) or []
+                                    if not items:
+                                        continue
+                                    st.markdown(f"**{section_key.upper()}**")
+                                    for j, it in enumerate(items, start=1):
+                                        title = it.get("title") or f"{section_key} {j}"
+                                        q_terms = it.get("query_terms") or []
+                                        query = " ".join(q_terms) if q_terms else title
+                                        hits, _ = vector_search_passages(query=query, cv_text=cv_text, top_k=2)
+                                        with st.expander(f"{j}. {title} — query: {query}", expanded=False):
+                                            if not hits:
+                                                st.write("No supporting passage found.")
+                                            else:
+                                                for h in hits:
+                                                    st.write(f"Score: {h['score']:.3f}")
+                                                    st.write(h["text"])
 
-                        with mid:
-                            fig = radar_plot(scores, title="Match par bloc")
-                            st.plotly_chart(fig, use_container_width=True, key=f"radar_{cv_id}")
+                        if do_gaps:
+                            with st.spinner("Mistral: gaps vs idéal…"):
+                                gaps = call_mistral_json_gap_to_ideal(
+                                    ao_pack=ao_pack if ao_pack else {},
+                                    cv_pack=cv_pack if cv_pack else {},
+                                    mistral_model=mistral_model_ao,
+                                )
+                            if gaps.get("error"):
+                                st.error(gaps["error"])
+                            else:
+                                st.json(gaps)
 
-                        with right:
-                            st.markdown("**Ce qui colle**")
-                            st.write(f"- Tech: {pretty_list(og['overlap_tech'])}")
-                            st.write(f"- Domain: {pretty_list(og['overlap_domain'])}")
-                            st.write(f"- Certifs: {pretty_list(og['overlap_cert'])}")
-
-                            st.markdown("**Ce qui manque**")
-                            st.write(f"- Tech: {pretty_list(og['missing_tech'])}")
-                            st.write(f"- Domain: {pretty_list(og['missing_domain'])}")
-                            st.write(f"- Certifs: {pretty_list(og['missing_cert'])}")
-
-                        st.markdown("</div>", unsafe_allow_html=True)
-
-                        with st.expander("Détails (justification + citations + gaps vs idéal)", expanded=False):
-                            colX, colY = st.columns(2)
-                            do_explain = colX.button("Générer justification (match)", key=f"explain_{cv_id}")
-                            do_gaps = colY.button("Générer manques vs idéal", key=f"gaps_{cv_id}")
-
-                            if do_explain:
-                                with st.spinner("Mistral: justification…"):
-                                    expl = call_mistral_json_explanation(
-                                        ao_pack=ao_pack if ao_pack else {},
-                                        cv_pack=cv_pack if cv_pack else {},
-                                        scores=scores,
-                                        mistral_model=mistral_model_ao,
-                                    )
-                                if expl.get("error"):
-                                    st.error(expl["error"])
-                                else:
-                                    st.json(expl)
-
-                                    st.markdown("#### Citations (preuves dans le CV)")
-                                    for section_key in ["strengths", "gaps"]:
-                                        items = expl.get(section_key) or []
-                                        if not items:
-                                            continue
-                                        st.markdown(f"**{section_key.upper()}**")
-                                        for j, it in enumerate(items, start=1):
-                                            title = it.get("title") or it.get("item") or f"Item {j}"
-                                            q_terms = it.get("query_terms") or []
-                                            st.markdown(f"- **{title}**")
-                                            for qt in q_terms[:5]:
-                                                passages, _m = vector_search_passages(str(qt), cv_text, top_k=2)
-                                                for p in passages:
-                                                    st.markdown(f"  - *(score {p['score']:.2f})* {p['text']}")
-
-                            if do_gaps:
-                                with st.spinner("Mistral: gaps vs idéal…"):
-                                    gaps = call_mistral_json_gap_to_ideal(
-                                        ao_pack=ao_pack if ao_pack else {},
-                                        cv_pack=cv_pack if cv_pack else {},
-                                        mistral_model=mistral_model_ao,
-                                    )
-                                if gaps.get("error"):
-                                    st.error(gaps["error"])
-                                else:
-                                    st.json(gaps)
-
-                    # ============================================================
-                    # Ranking final (ordre décroissant) — demandé
-                    # ============================================================
-                    st.markdown("### Classement final (ordre décroissant)")
-                    rank_df = out.copy()
-                    rank_df.insert(0, "rank", range(1, len(rank_df) + 1))
-                    st.dataframe(
-                        rank_df[
-                            [
-                                "rank",
-                                "filename",
-                                "nom",
-                                "role_principal",
-                                "seniorite",
-                                "score_global",
-                                "tech_skills",
-                                "experience",
-                                "domain_knowledge",
-                                "certifications",
-                                "cov_tech",
-                                "cov_domain",
-                                "cov_cert",
-                            ]
-                        ],
-                        use_container_width=True,
-                    )
+                                st.markdown("#### Citations (vérif dans le CV)")
+                                for section_key in ["must_have_missing", "nice_to_have_missing", "unclear"]:
+                                    items = gaps.get(section_key) or []
+                                    if not items:
+                                        continue
+                                    st.markdown(f"**{section_key.upper()}**")
+                                    for j, it in enumerate(items, start=1):
+                                        item = it.get("item") or f"{section_key} {j}"
+                                        q_terms = it.get("query_terms") or []
+                                        query = " ".join(q_terms) if q_terms else item
+                                        hits, _ = vector_search_passages(query=query, cv_text=cv_text, top_k=2)
+                                        with st.expander(f"{j}. {item} — query: {query}", expanded=False):
+                                            if not hits:
+                                                st.write("No supporting passage found.")
+                                            else:
+                                                for h in hits:
+                                                    st.write(f"Score: {h['score']:.3f}")
+                                                    st.write(h["text"])
 
 
 # ============================================================
@@ -516,16 +516,10 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("Base locale — CVs stockés")
     df_list = list_cvs(conn)
+    st.dataframe(df_list, use_container_width=True)
 
-    cols = ["cv_id", "filename", "nom", "role_principal", "seniorite_label"]
-    cols = [c for c in cols if c in df_list.columns]
-
-    if df_list.empty:
-        st.info("DB vide.")
-    else:
-        st.dataframe(df_list[cols], use_container_width=True)
-
-        st.markdown("### Supprimer un CV")
+    st.markdown("### Supprimer un CV")
+    if not df_list.empty:
         choice = st.selectbox(
             "Choisir un CV à supprimer",
             df_list["cv_id"].tolist(),
@@ -534,3 +528,5 @@ with tabs[2]:
         if st.button("Supprimer", type="secondary"):
             delete_cv(conn, choice)
             st.success("Supprimé. Recharge la page si besoin.")
+    else:
+        st.info("DB vide.")
