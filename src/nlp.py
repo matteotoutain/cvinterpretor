@@ -16,9 +16,9 @@ except Exception:
 # =========================
 # Embedding model (E5)
 # =========================
-# E5_MODEL_NAME = "intfloat/multilingual-e5-base"
+E5_MODEL_NAME = "BAAI/bge-m3"
 
-E5_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+#E5_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 def normalize_ws(s: str) -> str:
