@@ -418,6 +418,7 @@ with tabs[1]:
                                 unsafe_allow_html=True,
                             )
                             st.metric("Score global", f"{scores['global_score']:.3f}")
+                            st.caption(f"Semantic={scores.get('semantic_global',0):.3f} | Gate={((scores.get('coverage') or {}).get('gate',1.0)):.2f}")
 
                         with mid:
                             fig = radar_plot(scores, title="Match par bloc")
