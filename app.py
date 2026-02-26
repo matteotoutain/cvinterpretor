@@ -18,9 +18,9 @@ from src.mistral_client import (
 )
 
 
-def create_radar_chart(skills_like, experience_like, domain_like, soft_like, global_score):
-    categories = ['Skills-like', 'Experience-like', 'Domain-like', 'Soft-like', 'Global']
-    values = [skills_like, experience_like, domain_like, soft_like, global_score]
+def create_radar_chart(skills_like, experience_like, domain_like, certification_like, global_score):
+    categories = ['Skills-like', 'Experience-like', 'Domain-like', 'Certification-like', 'Global']
+    values = [skills_like, experience_like, domain_like, certification_like, global_score]
 
     fig = go.Figure(data=go.Scatterpolar(
         r=values,
@@ -59,7 +59,7 @@ with tabs[0]:
 
     st.markdown("### Options d'extraction (Mistral)")
     use_mistral = st.checkbox(
-        "Utiliser Mistral pour structurer le CV (blocs: skills, expériences, domaine, soft skills)",
+        "Utiliser Mistral pour structurer le CV (blocs: skills, expériences, domaine, certifications)",
         value=True,
     )
     mistral_model = st.text_input("Modèle Mistral (CV)", value=DEFAULT_MODEL, disabled=not use_mistral)
@@ -111,6 +111,7 @@ with tabs[0]:
                             '  "langues": "Languages, comma-separated",\n'
                             '  "hard_skills": ["List of hard skills / technologies as items"],\n'
                             '  "soft_skills": ["List of soft skills as items"],\n'
+                            '  "certifications": ["List of certifications / badges (ex: Salesforce Certified Associate, AWS SAA, PMP)"],\n'
                             '  "experiences": [\n'
                             '     {\n'
                             '       "mission": "Short mission title/summary",\n'
@@ -163,7 +164,7 @@ with tabs[1]:
     st.write("Ici l'AO n'est **pas** stocké : on calcule à la volée.")
 
     st.markdown("### Options d'analyse AO (Mistral)")
-    use_mistral_ao = st.checkbox("Utiliser Mistral pour structurer l'AO (blocs: skills, contexte, domaine, soft)", value=True)
+    use_mistral_ao = st.checkbox("Utiliser Mistral pour structurer l'AO (blocs: skills, contexte, domaine, certifications)", value=True)
     mistral_model_ao = st.text_input("Modèle Mistral (AO)", value=DEFAULT_MODEL, disabled=not use_mistral_ao)
 
     st.markdown("### Options d'explication (Mistral)")
@@ -208,7 +209,8 @@ with tabs[1]:
                             '  "competences_metier": ["List of business/soft skills expected"],\n'
                             '  "secteur": "Industry domain if stated (banking, insurance, public sector, etc.)",\n'
                             '  "experience_requise": "Required experience level or years",\n'
-                            '  "langues_requises": ["Languages required"]\n'
+                            '  "langues_requises": ["Languages required"],\n'
+                            '  "certifications_requises": ["Certifications explicitly required or strongly preferred"]\n'
                             "}\n"
                         )
 
@@ -217,7 +219,6 @@ with tabs[1]:
                             user_prompt=ao_extraction_prompt,
                             mistral_model=mistral_model_ao,
                         )
-
                     cvs = get_cv_texts(conn)
                     if cvs.empty:
                         st.warning("Aucun CV en base. Reviens à l'étape 1.")
@@ -264,7 +265,7 @@ with tabs[1]:
                                 "skills_like": scores["skills_like"],
                                 "experience_like": scores["experience_like"],
                                 "domain_like": scores["domain_like"],
-                                "soft_like": scores["soft_like"],
+                                "certification_like": scores["certification_like"],
                                 "global_score": scores["global_score"],
                                 "verdict": verdict_from_score(scores["global_score"]),
                             })
@@ -297,7 +298,7 @@ with tabs[1]:
                         st.warning(f"⚠️ Mistral AO extraction failed: {ao_struct.get('error')}")
 
                     st.caption(f"Méthode embeddings : **{method}** (cosine similarity).")
-                    st.info("Matching basé sur **blocs** (skills-like / experience-like / domain-like / soft-like).")
+                    st.info("Matching basé sur **blocs** (skills-like / experience-like / domain-like / certification-like).")
 
                     # Download section (same as before, but based on global score)
                     st.divider()
@@ -349,7 +350,7 @@ with tabs[1]:
                             with c3:
                                 st.metric("Domain-like", f"{row['domain_like']:.3f}")
                             with c4:
-                                st.metric("Soft-like", f"{row['soft_like']:.3f}")
+                                st.metric("Certification-like", f"{row['certification_like']:.3f}")
                             with c5:
                                 st.metric("Global", f"{row['global_score']:.3f}")
 
@@ -358,7 +359,7 @@ with tabs[1]:
                                     row["skills_like"],
                                     row["experience_like"],
                                     row["domain_like"],
-                                    row["soft_like"],
+                                    row["certification_like"],
                                     row["global_score"],
                                 ),
                                 use_container_width=True
@@ -401,7 +402,7 @@ with tabs[1]:
                                     "skills_like": float(row["skills_like"]),
                                     "experience_like": float(row["experience_like"]),
                                     "domain_like": float(row["domain_like"]),
-                                    "soft_like": float(row["soft_like"]),
+                                    "certification_like": float(row["certification_like"]),
                                     "global_score": float(row["global_score"]),
                                     "verdict": row["verdict"],
                                 }
@@ -420,8 +421,6 @@ with tabs[1]:
 
         except Exception as e:
             st.error(str(e))
-
-
 # ---------------------------
 # 3) Manage DB
 # ---------------------------
