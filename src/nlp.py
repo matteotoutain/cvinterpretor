@@ -1,4 +1,5 @@
 import re
+import json
 from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
@@ -6,78 +7,16 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 try:
-    from sentence_transformers import SentenceTransformer  # type: ignore
+    from sentence_transformers import SentenceTransformer
     _HAS_ST = True
 except Exception:
     _HAS_ST = False
 
 
-# ============================================================
-# Utils
-# ============================================================
 def normalize_ws(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
-def _as_list(x: Any) -> List[str]:
-    if x is None:
-        return []
-    if isinstance(x, list):
-        return [normalize_ws(str(i)) for i in x if normalize_ws(str(i))]
-    if isinstance(x, str):
-        # allow comma-separated
-        parts = [normalize_ws(p) for p in x.split(",")]
-        return [p for p in parts if p]
-    return [normalize_ws(str(x))]
-
-
-def _lower(s: str) -> str:
-    return (s or "").lower()
-
-
-def normalize_seniority_label(raw: str) -> str:
-    """
-    Map arbitrary seniority strings to one of: Junior | Senior | Manager | Unknown
-
-    Simple + deterministic: seniority is used ONLY as a late filter (business logic).
-    """
-    s = _lower(raw)
-
-    if not s.strip():
-        return "Unknown"
-
-    # Manager-ish keywords
-    if any(k in s for k in ["manager", "lead", "head", "director", "principal", "partner", "responsable", "chef de", "team lead"]):
-        return "Manager"
-
-    # Explicit senior / junior
-    if any(k in s for k in ["junior", "débutant", "debutant", "entry", "0-2", "0–2", "1-2", "1–2"]):
-        return "Junior"
-    if any(k in s for k in ["senior", "confirmé", "confirme", "confirmed", "experienced", "expert"]):
-        return "Senior"
-
-    # If there are years, use a rough bucketing
-    years = None
-    m = re.search(r"(\d{1,2})\s*\+?\s*(ans|years|year)", s)
-    if m:
-        try:
-            years = int(m.group(1))
-        except Exception:
-            years = None
-
-    if years is not None:
-        if years <= 2:
-            return "Junior"
-        if years <= 7:
-            return "Senior"
-        return "Manager"
-
-    return "Unknown"
-
-
-# ============================================================
-# Embeddings / Similarity
-# ============================================================
 def _embed_sentence_transformers(texts: List[str]) -> np.ndarray:
     model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     emb = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
@@ -112,54 +51,63 @@ def compute_similarity(query_text: str, documents: List[str]) -> Tuple[np.ndarra
     return scores.astype(float), "tf-idf"
 
 
-# ============================================================
-# Block building (keyword-first)
-# ============================================================
-BLOCK_KEYS = ["tech_skills", "experience", "domain_knowledge", "certifications"]
+# -----------------------------
+# Block building from Mistral JSON
+# -----------------------------
+def _as_list(x: Any) -> List[str]:
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return [normalize_ws(str(i)) for i in x if normalize_ws(str(i))]
+    if isinstance(x, str):
+        # allow comma-separated
+        parts = [normalize_ws(p) for p in x.split(",")]
+        return [p for p in parts if p]
+    return [normalize_ws(str(x))]
 
 
 def build_ao_blocks(ao_struct: Dict[str, Any], ao_fallback_text: str = "") -> Dict[str, str]:
     """
-    Create textual blocks for AO (Appel d'Offre).
-    Expected to receive a "keyword pack" style AO JSON (but works with partials).
+    Create textual blocks for AO.
+    Keys must match build_cv_blocks.
     """
     title = normalize_ws(str(ao_struct.get("titre_poste") or ""))
-    summary = normalize_ws(str(ao_struct.get("mission_summary") or ao_struct.get("contexte_mission") or ""))
+    context = normalize_ws(str(ao_struct.get("contexte_mission") or ""))
 
-    tech_req = ", ".join(_as_list(ao_struct.get("tech_skills_required") or ao_struct.get("competences_techniques")))
-    domain_req = ", ".join(_as_list(ao_struct.get("domain_knowledge_required") or ao_struct.get("secteur")))
-    cert_req = ", ".join(_as_list(ao_struct.get("certifications_required")))
-    exp_req = normalize_ws(str(ao_struct.get("experience_requise") or ao_struct.get("experience_required") or ""))
+    hard = ", ".join(_as_list(ao_struct.get("competences_techniques")))
+    soft = ", ".join(_as_list(ao_struct.get("competences_metier")))
+    domain = normalize_ws(str(ao_struct.get("secteur") or ao_struct.get("secteur_principal") or ""))  # optional
+    exp = normalize_ws(str(ao_struct.get("experience_requise") or ""))
+    langs = ", ".join(_as_list(ao_struct.get("langues_requises")))
 
-    if not (title or summary or tech_req or domain_req or cert_req or exp_req):
-        summary = ao_fallback_text[:4000]
+    # minimal fallback if some fields missing
+    if not (title or context or hard or soft or domain or exp or langs):
+        context = ao_fallback_text[:4000]
 
     return {
-        "tech_skills": normalize_ws(" ".join([title, tech_req])),
-        "experience": normalize_ws(" ".join([summary, exp_req])),
-        "domain_knowledge": normalize_ws(" ".join([domain_req, title])),
-        "certifications": normalize_ws(cert_req),
-        "full": normalize_ws(" ".join([title, summary, tech_req, domain_req, cert_req, exp_req])),
+        "skills_like": normalize_ws(" ".join([title, hard])),
+        "experience_like": normalize_ws(" ".join([context, exp])),
+        "domain_like": normalize_ws(" ".join([domain, title])),
+        "soft_like": normalize_ws(" ".join([soft, langs])),
+        "full": normalize_ws(" ".join([title, context, hard, soft, domain, exp, langs])),
     }
 
 
 def build_cv_blocks(cv_struct: Dict[str, Any], cv_fallback_text: str = "") -> Dict[str, str]:
     """
     Create textual blocks for CV.
-
-    Works best if cv_struct already contains:
-      - tech_skills (list)
-      - domain_knowledge (list)
-      - certifications (list)
-      - experiences (list of dicts)
+    Expected fields are produced by your Mistral extraction.
     """
     role = normalize_ws(str(cv_struct.get("role_principal") or ""))
+    seniority = normalize_ws(str(cv_struct.get("seniorite") or ""))
+    sector = normalize_ws(str(cv_struct.get("secteur_principal") or ""))
+    tech = ", ".join(_as_list(cv_struct.get("technologies")))
+    langs = ", ".join(_as_list(cv_struct.get("langues")))
 
-    tech = ", ".join(_as_list(cv_struct.get("tech_skills") or cv_struct.get("technologies") or cv_struct.get("hard_skills")))
-    domain = ", ".join(_as_list(cv_struct.get("domain_knowledge") or cv_struct.get("secteur_principal")))
-    certs = ", ".join(_as_list(cv_struct.get("certifications")))
+    # Optional richer fields if you extract them (recommended)
+    hard_skills = ", ".join(_as_list(cv_struct.get("hard_skills")))
+    soft_skills = ", ".join(_as_list(cv_struct.get("soft_skills")))
 
-    # Experience block: structured experiences first, else fallback text
     experiences_txt = ""
     exps = cv_struct.get("experiences")
     if isinstance(exps, list):
@@ -167,7 +115,7 @@ def build_cv_blocks(cv_struct: Dict[str, Any], cv_fallback_text: str = "") -> Di
         for e in exps[:10]:
             if isinstance(e, dict):
                 mission = normalize_ws(str(e.get("mission") or e.get("title") or ""))
-                stack = ", ".join(_as_list(e.get("stack") or e.get("tech") or e.get("technologies")))
+                stack = ", ".join(_as_list(e.get("stack")))
                 dom = normalize_ws(str(e.get("secteur") or e.get("domain") or ""))
                 dur = normalize_ws(str(e.get("duree") or e.get("duration") or ""))
                 chunks.append(normalize_ws(" ".join([mission, stack, dom, dur])))
@@ -176,27 +124,24 @@ def build_cv_blocks(cv_struct: Dict[str, Any], cv_fallback_text: str = "") -> Di
         experiences_txt = normalize_ws(" | ".join([c for c in chunks if c]))
 
     if not experiences_txt:
+        # fallback: use main cv_text slice if no structured experience
         experiences_txt = normalize_ws(cv_fallback_text[:2500])
 
+    # if older extraction used only technologies/langues etc., keep it usable
+    skills_like = normalize_ws(" ".join([role, tech, hard_skills]))
+    soft_like = normalize_ws(" ".join([soft_skills, langs]))
+    domain_like = normalize_ws(" ".join([sector, role]))
+    experience_like = normalize_ws(" ".join([experiences_txt, seniority]))
+
+    full = normalize_ws(" ".join([skills_like, experience_like, domain_like, soft_like]))
+
     return {
-        "tech_skills": normalize_ws(" ".join([role, tech])),
-        "experience": normalize_ws(" ".join([role, experiences_txt])),
-        "domain_knowledge": normalize_ws(" ".join([domain, role])),
-        "certifications": normalize_ws(certs),
-        "full": normalize_ws(" ".join([role, tech, domain, certs, experiences_txt])),
+        "skills_like": skills_like,
+        "experience_like": experience_like,
+        "domain_like": domain_like,
+        "soft_like": soft_like,
+        "full": full,
     }
-
-
-# ============================================================
-# Scoring
-# ============================================================
-def _normalize_weights(weights: Dict[str, float]) -> Dict[str, float]:
-    w = {k: float(weights.get(k, 0.0)) for k in BLOCK_KEYS}
-    s = sum(max(v, 0.0) for v in w.values())
-    if s <= 0:
-        # safe fallback (equal)
-        return {k: 1.0 / len(BLOCK_KEYS) for k in BLOCK_KEYS}
-    return {k: max(v, 0.0) / s for k, v in w.items()}
 
 
 def score_blocks(
@@ -208,13 +153,17 @@ def score_blocks(
     Compute similarity per block and weighted global score.
     """
     if weights is None:
-        weights = {k: 1.0 / len(BLOCK_KEYS) for k in BLOCK_KEYS}
-    weights = _normalize_weights(weights)
+        weights = {
+            "skills_like": 0.40,
+            "experience_like": 0.30,
+            "domain_like": 0.20,
+            "soft_like": 0.10,
+        }
 
     method_used = None
-    per_block: Dict[str, float] = {}
+    per_block = {}
 
-    for k in BLOCK_KEYS:
+    for k in ["skills_like", "experience_like", "domain_like", "soft_like"]:
         q = ao_blocks.get(k, "") or ""
         d = cv_blocks.get(k, "") or ""
         scores, method = compute_similarity(q, [d])
@@ -227,7 +176,6 @@ def score_blocks(
 
     out = dict(per_block)
     out["global_score"] = float(global_score)
-    out["weights_used"] = dict(weights)
 
     return out, (method_used or "unknown")
 
@@ -238,56 +186,3 @@ def verdict_from_score(s: float) -> str:
     if s >= 0.55:
         return "Moderate Fit"
     return "Low Fit"
-
-
-# ============================================================
-# Vector search for citations (chunked CV)
-# ============================================================
-def chunk_text(text: str, max_chars: int = 900, overlap: int = 150) -> List[str]:
-    """
-    Simple chunking by characters with overlap.
-    Good enough to cite "passages" without relying on PDF coordinates.
-    """
-    t = normalize_ws(text)
-    if not t:
-        return []
-    chunks: List[str] = []
-    i = 0
-    n = len(t)
-    while i < n:
-        j = min(n, i + max_chars)
-        chunk = t[i:j].strip()
-        if chunk:
-            chunks.append(chunk)
-        if j >= n:
-            break
-        i = max(0, j - overlap)
-    return chunks
-
-
-def vector_search_passages(
-    query: str,
-    cv_text: str,
-    top_k: int = 3,
-) -> Tuple[List[Dict[str, Any]], str]:
-    """
-    Returns top passages with scores:
-      [{"rank": 1, "score": 0.83, "text": "..."}]
-    """
-    chunks = chunk_text(cv_text)
-    if not chunks:
-        return [], "no_text"
-
-    scores, method = compute_similarity(query, chunks)
-    idxs = np.argsort(scores)[::-1][:top_k]
-
-    out: List[Dict[str, Any]] = []
-    for r, idx in enumerate(idxs, start=1):
-        out.append(
-            {
-                "rank": r,
-                "score": float(scores[idx]),
-                "text": chunks[int(idx)],
-            }
-        )
-    return out, method
