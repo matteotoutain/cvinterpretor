@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import json
-import math
 import plotly.graph_objects as go
 from typing import Any, Dict, List, Tuple
 
@@ -15,8 +14,8 @@ from src.nlp import (
     verdict_from_score,
     normalize_seniority_label,
     vector_search_passages,
-    compute_similarity,   # NEW (semantic overlap)
-    normalize_ws,         # NEW (small cleanup)
+    compute_similarity,
+    normalize_ws,
 )
 
 from src.mistral_client import (
@@ -28,7 +27,7 @@ from src.mistral_client import (
 )
 
 # ============================================================
-# UI Style (simple + clean)
+# UI Style
 # ============================================================
 st.set_page_config(page_title=APP_NAME, layout="wide")
 st.markdown(
@@ -70,14 +69,6 @@ tabs = st.tabs(["1) Import CVs (Batch)", "2) Import AO & Analyse (Ponctuel)", "D
 # ============================================================
 # Helpers
 # ============================================================
-def _csv_join(x: Any) -> str:
-    if x is None:
-        return ""
-    if isinstance(x, list):
-        return ", ".join([str(i).strip() for i in x if str(i).strip()])
-    return str(x).strip()
-
-
 def _safe_json_dumps(obj: Any) -> str:
     try:
         return json.dumps(obj, ensure_ascii=False)
@@ -139,25 +130,6 @@ def radar_plot(scores: Dict[str, Any], title: str = ""):
     return fig
 
 
-def set_from_pack(pack: Dict[str, Any], key: str) -> set:
-    x = pack.get(key)
-    if x is None:
-        return set()
-    if isinstance(x, list):
-        items = x
-    else:
-        items = [p.strip() for p in str(x).split(",")]
-    out = set()
-    for it in items:
-        s = str(it).strip().lower()
-        if s:
-            out.add(s)
-    return out
-
-
-# ----------------------------
-# NEW: semantic overlap (less tatillon, no hardcoded dictionaries)
-# ----------------------------
 def _list_from_pack(pack: Dict[str, Any], key: str) -> List[str]:
     x = pack.get(key)
     if x is None:
@@ -174,55 +146,10 @@ def _list_from_pack(pack: Dict[str, Any], key: str) -> List[str]:
     return out
 
 
-def _semantic_overlap_and_gaps(
-    ao_terms: List[str],
-    cv_terms: List[str],
-    threshold: float,
-) -> Tuple[List[str], List[str]]:
-    ao_terms = [t for t in ao_terms if (t or "").strip()]
-    cv_terms = [t for t in cv_terms if (t or "").strip()]
-
-    if not ao_terms:
-        return [], []
-    if not cv_terms:
-        return [], ao_terms
-
-    overlap: List[str] = []
-    missing: List[str] = []
-
-    for a in ao_terms:
-        scores, _ = compute_similarity(a, cv_terms)
-        best = float(scores.max()) if len(scores) else 0.0
-        if best >= threshold:
-            overlap.append(a)
-        else:
-            missing.append(a)
-
-    return overlap, missing
-
-
 def overlap_and_gaps(ao_pack: Dict[str, Any], cv_pack: Dict[str, Any], cv_text: str) -> Dict[str, List[str]]:
     """
-    Less tatillon + discriminant:
-    - We check AO terms against CV *text* using embedding search on chunks.
-    - No hardcoded dictionaries, just evidence-based semantic retrieval.
-    Output schema unchanged.
+    Evidence-based (per CV text) - discriminant.
     """
-    def _list_from_pack(pack: Dict[str, Any], key: str) -> List[str]:
-        x = pack.get(key)
-        if x is None:
-            return []
-        if isinstance(x, list):
-            items = x
-        else:
-            items = [p.strip() for p in str(x).split(",")]
-        out: List[str] = []
-        for it in items:
-            s = normalize_ws(str(it)).strip().lower()
-            if s:
-                out.append(s)
-        return out
-
     def _evidence_present(term: str, threshold: float) -> bool:
         hits, _ = vector_search_passages(term, cv_text, top_k=1)
         if not hits:
@@ -230,12 +157,11 @@ def overlap_and_gaps(ao_pack: Dict[str, Any], cv_pack: Dict[str, Any], cv_text: 
         return float(hits[0]["score"]) >= threshold
 
     ao_tech = _list_from_pack(ao_pack, "tech_skills_required")
-    ao_dom  = _list_from_pack(ao_pack, "domain_knowledge_required")
+    ao_dom = _list_from_pack(ao_pack, "domain_knowledge_required")
     ao_cert = _list_from_pack(ao_pack, "certifications_required")
 
-    # thresholds (category-level, not domain hardcode)
     T_TECH = 0.62
-    T_DOM  = 0.55
+    T_DOM = 0.55
     T_CERT = 0.62
 
     over_tech, miss_tech = [], []
@@ -301,28 +227,16 @@ with tabs[0]:
 
                 for f in files:
                     try:
-                        # --------------------------------------------------
-                        # 1) Lire bytes
-                        # --------------------------------------------------
                         raw_bytes = f.getvalue()
                         filename = f.name
 
-                        # --------------------------------------------------
-                        # 2) ID stable (basé uniquement sur le contenu)
-                        # --------------------------------------------------
                         cv_id = stable_id_from_bytes(raw_bytes)
 
-                        # --------------------------------------------------
-                        # 3) Extraction texte
-                        # --------------------------------------------------
                         doc_type, text = extract_text_generic(
                             filename=filename,
                             file_bytes=raw_bytes,
                         )
 
-                        # --------------------------------------------------
-                        # 4) Extraction Mistral (optionnel)
-                        # --------------------------------------------------
                         cv_keywords = {}
                         if use_mistral:
                             cv_keywords = call_mistral_cv_keyword_pack(
@@ -330,23 +244,9 @@ with tabs[0]:
                                 mistral_model=mistral_model,
                             ) or {}
 
-                        # --------------------------------------------------
-                        # 5) Seniority normalisée
-                        # --------------------------------------------------
-                        senior_raw = str(
-                            cv_keywords.get("seniorite_raw")
-                            or cv_keywords.get("seniorite")
-                            or ""
-                        )
+                        senior_raw = str(cv_keywords.get("seniorite_raw") or cv_keywords.get("seniorite") or "")
+                        senior_label = cv_keywords.get("seniorite_label") or normalize_seniority_label(senior_raw)
 
-                        senior_label = (
-                            cv_keywords.get("seniorite_label")
-                            or normalize_seniority_label(senior_raw)
-                        )
-
-                        # --------------------------------------------------
-                        # 6) Construction ligne DB
-                        # --------------------------------------------------
                         row = {
                             "cv_id": cv_id,
                             "filename": filename,
@@ -360,11 +260,7 @@ with tabs[0]:
                             "seniorite_raw": senior_raw,
                         }
 
-                        # --------------------------------------------------
-                        # 7) Upsert DB
-                        # --------------------------------------------------
                         upsert_cv(conn, row)
-
                         n_ok += 1
 
                     except Exception as e:
@@ -372,13 +268,13 @@ with tabs[0]:
 
                 st.success(f"Import terminé : {n_ok} CV(s) ajouté(s) / mis à jour.")
 
+
 # ============================================================
 # TAB 2 — Import AO & Analyse
 # ============================================================
 with tabs[1]:
     st.subheader("Étape 2 — Uploader un AO et scorer les CVs (ponctuel)")
-
-    st.write("Tu importes un **AO** (pdf/docx/txt/pptx) → extraction → (optionnel) Mistral pack AO → matching vs DB.")
+    st.write("Tu importes un **AO** → extraction → (optionnel) Mistral pack AO → matching vs DB.")
 
     st.markdown("### 2.1 Import AO")
     use_mistral_ao = st.checkbox("Utiliser Mistral pour extraire un 'keyword pack' AO", value=True)
@@ -387,7 +283,6 @@ with tabs[1]:
     ao_file = st.file_uploader("AO (pdf/docx/txt/pptx)", type=["pptx", "pdf", "docx", "txt"], accept_multiple_files=False)
 
     st.markdown("### 2.2 Filtres & pondérations")
-    st.caption("Filtres : keywords (optionnel) + seniority label. Pondérations : Tech / Experience / Domain / Certifs.")
     selected_terms = st.text_input("Filtre mots-clés (optionnel, séparés par virgule)", value="")
     terms = [t.strip() for t in selected_terms.split(",") if t.strip()]
 
@@ -396,7 +291,6 @@ with tabs[1]:
     w_exp = colB.slider("Poids Experience", 0.0, 1.0, 0.35, 0.05)
     w_dom = colC.slider("Poids Domain", 0.0, 1.0, 0.20, 0.05)
     w_cert = colD.slider("Poids Certifs", 0.0, 1.0, 0.10, 0.05)
-
     weights = {"tech_skills": w_tech, "experience": w_exp, "domain_knowledge": w_dom, "certifications": w_cert}
 
     if st.button("Lancer l'analyse"):
@@ -404,7 +298,7 @@ with tabs[1]:
             st.warning("Aucun AO.")
         else:
             raw = ao_file.read()
-            ao_text = extract_text_generic(ao_file.name, raw)
+            ao_doc_type, ao_text = extract_text_generic(filename=ao_file.name, file_bytes=raw)
 
             ao_pack = {}
             if use_mistral_ao:
@@ -413,31 +307,34 @@ with tabs[1]:
 
             ao_blocks = build_ao_blocks(ao_pack if ao_pack else {}, ao_fallback_text=ao_text)
 
-            # Load CVs from DB
-            df = list_cvs(conn)
-            if df.empty:
+            # IMPORTANT: use get_cv_texts so we have cv_text + json packs
+            df_full = get_cv_texts(conn)
+            if df_full.empty:
                 st.warning("DB vide. Importe des CVs d'abord.")
             else:
                 rows = []
-                for _, r in df.iterrows():
+                for _, r in df_full.iterrows():
                     cv_text = r.get("cv_text") or ""
                     cv_pack = _safe_json_loads(r.get("cv_keywords_json")) or _safe_json_loads(r.get("cv_struct_json")) or {}
 
                     cv_blocks = build_cv_blocks(cv_pack, cv_fallback_text=cv_text)
-                    scores, method = score_blocks(ao_blocks, cv_blocks, weights=weights)
 
-                    senior_label = str(r.get("seniorite") or "Unknown")
+                    scores, method = score_blocks(
+                        ao_blocks,
+                        cv_blocks,
+                        weights=weights,
+                        ao_pack=ao_pack if ao_pack else None,
+                        cv_text=cv_text,
+                    )
+
+                    senior_label = str(r.get("seniorite_label") or "Unknown")
 
                     if terms:
                         hay = " ".join(
                             [
-                                str(r.get("tech_skills") or ""),
-                                str(r.get("domain_knowledge") or ""),
-                                str(r.get("certifications") or ""),
-                                str(r.get("technologies") or ""),
-                                str(r.get("secteur_principal") or ""),
+                                str(r.get("nom") or ""),
                                 str(r.get("role_principal") or ""),
-                                str(cv_text[:1200] or ""),
+                                str(cv_text[:1500] or ""),
                             ]
                         )
                         if not _contains_all_terms(hay, terms):
@@ -456,6 +353,9 @@ with tabs[1]:
                             "domain_knowledge": scores.get("domain_knowledge", 0.0),
                             "certifications": scores.get("certifications", 0.0),
                             "method": method,
+                            "cov_tech": (scores.get("coverage") or {}).get("tech", None),
+                            "cov_domain": (scores.get("coverage") or {}).get("domain", None),
+                            "cov_cert": (scores.get("coverage") or {}).get("cert", None),
                         }
                     )
 
@@ -466,14 +366,11 @@ with tabs[1]:
 
                     st.info(f"{len(out)} candidat(s) après filtres — affichage Top {min(10, len(out))}.")
 
-                    # Keep the dataframe (useful for debugging / export)
                     with st.expander("Table brute (debug)", expanded=False):
                         st.dataframe(out, use_container_width=True)
 
                     st.markdown("### Résultats (cards + radar + match/missing)")
                     top_k = min(10, len(out))
-
-                    df_full = get_cv_texts(conn)
 
                     for i in range(top_k):
                         row = out.iloc[i]
@@ -484,7 +381,14 @@ with tabs[1]:
                         cv_pack = _safe_json_loads(full.get("cv_keywords_json")) or _safe_json_loads(full.get("cv_struct_json")) or {}
 
                         cv_blocks = build_cv_blocks(cv_pack, cv_fallback_text=cv_text)
-                        scores, method = score_blocks(ao_blocks, cv_blocks, weights=weights)
+
+                        scores, method = score_blocks(
+                            ao_blocks,
+                            cv_blocks,
+                            weights=weights,
+                            ao_pack=ao_pack if ao_pack else None,
+                            cv_text=cv_text,
+                        )
                         verdict = verdict_from_score(scores["global_score"])
 
                         og = overlap_and_gaps(ao_pack if ao_pack else {}, cv_pack if cv_pack else {}, cv_text=cv_text)
@@ -498,7 +402,12 @@ with tabs[1]:
                                 st.write(f"**{row['nom']}**")
                             if row.get("role_principal"):
                                 st.write(f"🧩 {row['role_principal']}")
-                            st.caption(f"DEBUG: cv_text_len={len(cv_text)} | pack_keys={len(cv_pack.keys())}")
+
+                            cov = scores.get("coverage")
+                            if isinstance(cov, dict):
+                                st.caption(
+                                    f"Coverage — Tech:{cov.get('tech',0):.2f} | Domain:{cov.get('domain',0):.2f} | Cert:{cov.get('cert',0):.2f}"
+                                )
 
                             st.markdown(
                                 f"""
@@ -555,13 +464,10 @@ with tabs[1]:
                                             title = it.get("title") or it.get("item") or f"Item {j}"
                                             q_terms = it.get("query_terms") or []
                                             st.markdown(f"- **{title}**")
-                                            if q_terms:
-                                                for qt in q_terms[:5]:
-                                                    passages, _m = vector_search_passages(str(qt), cv_text, top_k=2)
-                                                    for p in passages:
-                                                        st.markdown(
-                                                            f"  - *(score {p['score']:.2f})* {p['text']}",
-                                                        )
+                                            for qt in q_terms[:5]:
+                                                passages, _m = vector_search_passages(str(qt), cv_text, top_k=2)
+                                                for p in passages:
+                                                    st.markdown(f"  - *(score {p['score']:.2f})* {p['text']}")
 
                             if do_gaps:
                                 with st.spinner("Mistral: gaps vs idéal…"):
@@ -575,6 +481,33 @@ with tabs[1]:
                                 else:
                                     st.json(gaps)
 
+                    # ============================================================
+                    # Ranking final (ordre décroissant) — demandé
+                    # ============================================================
+                    st.markdown("### Classement final (ordre décroissant)")
+                    rank_df = out.copy()
+                    rank_df.insert(0, "rank", range(1, len(rank_df) + 1))
+                    st.dataframe(
+                        rank_df[
+                            [
+                                "rank",
+                                "filename",
+                                "nom",
+                                "role_principal",
+                                "seniorite",
+                                "score_global",
+                                "tech_skills",
+                                "experience",
+                                "domain_knowledge",
+                                "certifications",
+                                "cov_tech",
+                                "cov_domain",
+                                "cov_cert",
+                            ]
+                        ],
+                        use_container_width=True,
+                    )
+
 
 # ============================================================
 # TAB 3 — DB management
@@ -583,7 +516,6 @@ with tabs[2]:
     st.subheader("Base locale — CVs stockés")
     df_list = list_cvs(conn)
 
-    # ✅ compat: ta DB expose "seniorite_label", pas "seniorite"
     cols = ["cv_id", "filename", "nom", "role_principal", "seniorite_label"]
     cols = [c for c in cols if c in df_list.columns]
 
