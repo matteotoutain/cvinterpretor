@@ -13,12 +13,30 @@ except Exception:
     _HAS_ST = False
 
 
+# =============================
+# Embeddings model (SentenceTransformers)
+# =============================
+# We use multilingual-e5-base for robust FR/EN matching.
+# IMPORTANT: E5 expects instruction prefixes:
+#   - "query: " for the query (AO)
+#   - "passage: " for documents (CV)
+ST_MODEL_NAME = "intfloat/multilingual-e5-base"
+_ST_MODEL = None
+
+
 def normalize_ws(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
+def _get_st_model() -> "SentenceTransformer":
+    global _ST_MODEL
+    if _ST_MODEL is None:
+        _ST_MODEL = SentenceTransformer(ST_MODEL_NAME)
+    return _ST_MODEL
+
+
 def _embed_sentence_transformers(texts: List[str]) -> np.ndarray:
-    model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    model = _get_st_model()
     emb = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
     return np.asarray(emb)
 
@@ -33,14 +51,20 @@ def compute_similarity(query_text: str, documents: List[str]) -> Tuple[np.ndarra
     """
     Return (scores in [0..1], method).
     """
-    texts = [query_text] + documents
+    # Prepare inputs for E5 (query/passages)
+    # Keep it robust even if callers pass empty strings.
+    qtxt = normalize_ws(query_text)
+    docs = [normalize_ws(d) for d in (documents or [])]
+
+    # E5-style prefixing
+    texts = [f"query: {qtxt}"] + [f"passage: {d}" for d in docs]
     if _HAS_ST:
         try:
             emb = _embed_sentence_transformers(texts)
             q = emb[0:1]
             d = emb[1:]
             scores = cosine_similarity(q, d)[0]
-            return scores.astype(float), "sentence-transformers (all-MiniLM-L6-v2)"
+            return scores.astype(float), f"sentence-transformers ({ST_MODEL_NAME})"
         except Exception:
             pass
 
@@ -80,16 +104,25 @@ def build_ao_blocks(ao_struct: Dict[str, Any], ao_fallback_text: str = "") -> Di
     exp = normalize_ws(str(ao_struct.get("experience_requise") or ""))
     langs = ", ".join(_as_list(ao_struct.get("langues_requises")))
 
+    # New category: certifications
+    certs = ", ".join(
+        _as_list(
+            ao_struct.get("certifications_requises")
+            or ao_struct.get("certifications")
+            or ao_struct.get("certification")
+        )
+    )
+
     # minimal fallback if some fields missing
-    if not (title or context or hard or soft or domain or exp or langs):
+    if not (title or context or hard or soft or domain or exp or langs or certs):
         context = ao_fallback_text[:4000]
 
     return {
-        "skills_like": normalize_ws(" ".join([title, hard])),
+        "skills_like": normalize_ws(" ".join([title, hard, langs])),
         "experience_like": normalize_ws(" ".join([context, exp])),
         "domain_like": normalize_ws(" ".join([domain, title])),
-        "soft_like": normalize_ws(" ".join([soft, langs])),
-        "full": normalize_ws(" ".join([title, context, hard, soft, domain, exp, langs])),
+        "certification_like": normalize_ws(" ".join([certs])),
+        "full": normalize_ws(" ".join([title, context, hard, soft, certs, domain, exp, langs])),
     }
 
 
@@ -107,6 +140,15 @@ def build_cv_blocks(cv_struct: Dict[str, Any], cv_fallback_text: str = "") -> Di
     # Optional richer fields if you extract them (recommended)
     hard_skills = ", ".join(_as_list(cv_struct.get("hard_skills")))
     soft_skills = ", ".join(_as_list(cv_struct.get("soft_skills")))
+
+    # New: certifications
+    certs = ", ".join(
+        _as_list(
+            cv_struct.get("certifications")
+            or cv_struct.get("certifs")
+            or cv_struct.get("certification")
+        )
+    )
 
     experiences_txt = ""
     exps = cv_struct.get("experiences")
@@ -129,17 +171,17 @@ def build_cv_blocks(cv_struct: Dict[str, Any], cv_fallback_text: str = "") -> Di
 
     # if older extraction used only technologies/langues etc., keep it usable
     skills_like = normalize_ws(" ".join([role, tech, hard_skills]))
-    soft_like = normalize_ws(" ".join([soft_skills, langs]))
+    certification_like = normalize_ws(" ".join([certs]))
     domain_like = normalize_ws(" ".join([sector, role]))
     experience_like = normalize_ws(" ".join([experiences_txt, seniority]))
 
-    full = normalize_ws(" ".join([skills_like, experience_like, domain_like, soft_like]))
+    full = normalize_ws(" ".join([skills_like, experience_like, domain_like, certification_like, soft_skills, langs]))
 
     return {
         "skills_like": skills_like,
         "experience_like": experience_like,
         "domain_like": domain_like,
-        "soft_like": soft_like,
+        "certification_like": certification_like,
         "full": full,
     }
 
@@ -157,13 +199,13 @@ def score_blocks(
             "skills_like": 0.40,
             "experience_like": 0.30,
             "domain_like": 0.20,
-            "soft_like": 0.10,
+            "certification_like": 0.10,
         }
 
     method_used = None
     per_block = {}
 
-    for k in ["skills_like", "experience_like", "domain_like", "soft_like"]:
+    for k in ["skills_like", "experience_like", "domain_like", "certification_like"]:
         q = ao_blocks.get(k, "") or ""
         d = cv_blocks.get(k, "") or ""
         scores, method = compute_similarity(q, [d])
