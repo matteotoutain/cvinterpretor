@@ -98,23 +98,54 @@ def _embed_tfidf(texts: List[str]) -> np.ndarray:
 
 
 def compute_similarity(query_text: str, documents: List[str]) -> Tuple[np.ndarray, str]:
-    texts = [query_text] + documents
+    """
+    Return (scores in [0..1], method).
+    """
+    if not documents:
+        return np.array([], dtype=float), "none"
+
     if _HAS_ST:
         try:
-            emb = _embed_sentence_transformers(texts)
-            q = emb[0:1]
-            d = emb[1:]
-            scores = cosine_similarity(q, d)[0]
+            # E5-style prefixes = beaucoup moins de faux positifs
+            q = "query: " + (query_text or "").strip()
+            docs = ["passage: " + (d or "").strip() for d in documents]
+
+            emb = _embed_sentence_transformers([q] + docs)
+            qv = emb[0:1]
+            dv = emb[1:]
+            scores = cosine_similarity(qv, dv)[0]
             return scores.astype(float), f"sentence-transformers ({_ST_MODEL_NAME})"
         except Exception:
             pass
 
+    texts = [query_text] + documents
     emb = _embed_tfidf(texts)
-    q = emb[0:1]
-    d = emb[1:]
-    scores = cosine_similarity(q, d)[0]
+    qv = emb[0:1]
+    dv = emb[1:]
+    scores = cosine_similarity(qv, dv)[0]
     return scores.astype(float), "tf-idf"
 
+def coverage_hit_rate(terms: List[str], text: str, threshold: float = 0.62) -> float:
+    """
+    % de termes AO qui ont au moins 1 chunk du CV avec sim >= threshold.
+    Much stricter than soft averaging -> kills false positives.
+    """
+    terms = [normalize_ws(t).lower() for t in (terms or []) if normalize_ws(t)]
+    if not terms:
+        return 0.0
+
+    chunks = chunk_text(text)
+    if not chunks:
+        return 0.0
+
+    hits = 0
+    for t in terms:
+        scores, _ = compute_similarity(t, chunks)
+        best = float(np.max(scores)) if len(scores) else 0.0
+        if best >= threshold:
+            hits += 1
+
+    return float(hits) / float(len(terms))
 
 # ============================================================
 # Block building (keyword-first)
@@ -271,11 +302,7 @@ def score_blocks(
     ao_pack: Optional[Dict[str, Any]] = None,
     cv_text: str = "",
 ) -> Tuple[Dict[str, float], str]:
-    """
-    Less-tatillon + discriminant scoring:
-    1) Block semantic similarity with pooling (as before)
-    2) + AO-term coverage against CV text (soft coverage) to avoid score flattening
-    """
+
     if weights is None:
         weights = {k: 1.0 / len(BLOCK_KEYS) for k in BLOCK_KEYS}
     weights = _normalize_weights(weights)
@@ -304,32 +331,45 @@ def score_blocks(
 
         scores, method = compute_similarity(q, candidates)
         method_used = method
-        pooled = _softmax_pool(scores.tolist(), tau=0.20)
-        per_block[k] = float(pooled)
+        per_block[k] = float(_softmax_pool(scores.tolist(), tau=0.20))
 
+    # --- base global semantic score
+    semantic_global = 0.0
+    for k, w in weights.items():
+        semantic_global += per_block.get(k, 0.0) * float(w)
+
+    # --- coverage gating (strict hit-rate)
     coverage_dbg = None
+    gated_global = float(semantic_global)
+
     if ao_pack and cv_text and cv_text.strip():
         ao_tech = _as_list(ao_pack.get("tech_skills_required"))
-        ao_dom = _as_list(ao_pack.get("domain_knowledge_required"))
+        ao_dom  = _as_list(ao_pack.get("domain_knowledge_required"))
         ao_cert = _as_list(ao_pack.get("certifications_required"))
 
-        tech_cov = soft_coverage_score(ao_tech, cv_text) if ao_tech else 0.0
-        dom_cov = soft_coverage_score(ao_dom, cv_text) if ao_dom else 0.0
-        cert_cov = soft_coverage_score(ao_cert, cv_text) if ao_cert else 0.0
+        tech_cov = coverage_hit_rate(ao_tech, cv_text, threshold=0.62) if ao_tech else 0.0
+        dom_cov  = coverage_hit_rate(ao_dom,  cv_text, threshold=0.58) if ao_dom  else 0.0
+        cert_cov = coverage_hit_rate(ao_cert, cv_text, threshold=0.62) if ao_cert else 0.0
 
-        # Blend: keep semantic blocks, inject coverage to spread rankings
-        per_block["tech_skills"] = 0.55 * per_block.get("tech_skills", 0.0) + 0.45 * tech_cov
-        per_block["domain_knowledge"] = 0.55 * per_block.get("domain_knowledge", 0.0) + 0.45 * dom_cov
-        per_block["certifications"] = 0.55 * per_block.get("certifications", 0.0) + 0.45 * cert_cov
+        # coverage overall: pondérée, simple
+        cov_overall = 0.5 * tech_cov + 0.4 * dom_cov + 0.1 * cert_cov
 
-        coverage_dbg = {"tech": float(tech_cov), "domain": float(dom_cov), "cert": float(cert_cov)}
+        # GATING: si cov est faible, ton global s’effondre (faux positifs tués)
+        # floor=0.15 pour éviter 0 absolu si AO pack a peu de termes ou bruit.
+        gate = 0.15 + 0.85 * cov_overall
+        gated_global = float(semantic_global) * float(gate)
 
-    global_score = 0.0
-    for k, w in weights.items():
-        global_score += per_block.get(k, 0.0) * float(w)
+        coverage_dbg = {
+            "tech": float(tech_cov),
+            "domain": float(dom_cov),
+            "cert": float(cert_cov),
+            "overall": float(cov_overall),
+            "gate": float(gate),
+        }
 
     out = dict(per_block)
-    out["global_score"] = float(global_score)
+    out["global_score"] = float(gated_global)
+    out["semantic_global"] = float(semantic_global)
     out["weights_used"] = dict(weights)
     if coverage_dbg is not None:
         out["coverage"] = coverage_dbg
