@@ -109,9 +109,9 @@ with tabs[0]:
                             '  "secteur_principal": "Main industry sector(s), comma-separated",\n'
                             '  "technologies": "Key tools/tech mentioned, comma-separated",\n'
                             '  "langues": "Languages, comma-separated",\n'
+                            '  "certifications": ["List of certifications (e.g., Salesforce Certified Associate, PMP, AWS, Azure...)"],\n'
                             '  "hard_skills": ["List of hard skills / technologies as items"],\n'
                             '  "soft_skills": ["List of soft skills as items"],\n'
-                            '  "certifications": ["List of certifications / badges (ex: Salesforce Certified Associate, AWS SAA, PMP)"],\n'
                             '  "experiences": [\n'
                             '     {\n'
                             '       "mission": "Short mission title/summary",\n'
@@ -131,11 +131,9 @@ with tabs[0]:
                         )
 
                         if extracted and not extracted.get("error"):
-                            # store key fields for quick display
                             for k in ["nom", "role_principal", "seniorite", "secteur_principal", "technologies", "langues", "cv_text"]:
                                 if k in extracted and extracted[k] is not None:
                                     row[k] = extracted[k]
-                            # store full struct JSON (for block scoring)
                             row["cv_struct_json"] = json.dumps(extracted, ensure_ascii=False)
                         else:
                             st.write(f"⚠️ Mistral extraction failed for {f.name}: {extracted.get('error') if extracted else 'Unknown error'}")
@@ -210,7 +208,7 @@ with tabs[1]:
                             '  "secteur": "Industry domain if stated (banking, insurance, public sector, etc.)",\n'
                             '  "experience_requise": "Required experience level or years",\n'
                             '  "langues_requises": ["Languages required"],\n'
-                            '  "certifications_requises": ["Certifications explicitly required or strongly preferred"]\n'
+                            '  "certifications_requises": ["Certifications explicitly required or strongly desired"]\n'
                             "}\n"
                         )
 
@@ -219,19 +217,18 @@ with tabs[1]:
                             user_prompt=ao_extraction_prompt,
                             mistral_model=mistral_model_ao,
                         )
+
                     cvs = get_cv_texts(conn)
                     if cvs.empty:
                         st.warning("Aucun CV en base. Reviens à l'étape 1.")
                         status.update(label="Analyse impossible (0 CV)", state="error")
                     else:
-                        # Build AO blocks (structured if possible; fallback otherwise)
                         if isinstance(ao_struct, dict) and not ao_struct.get("error"):
                             ao_blocks = build_ao_blocks(ao_struct, ao_fallback_text=ao_text)
                         else:
                             ao_struct = {"error": ao_struct.get("error")} if isinstance(ao_struct, dict) else {"error": "AO struct failed"}
                             ao_blocks = build_ao_blocks({}, ao_fallback_text=ao_text)
 
-                        # Score each CV by blocks
                         rows = []
                         method_used = None
 
@@ -283,13 +280,11 @@ with tabs[1]:
 
                         status.update(label="Analyse terminée ✅", state="complete")
 
-                # Display results
                 if st.session_state.ao_analysis_results:
                     results = st.session_state.ao_analysis_results
                     cvs = results["cvs"]
                     ao_struct = results["ao_struct"]
                     method = results["method"]
-                    ao_text = results["ao_text"]
 
                     if ao_struct and isinstance(ao_struct, dict) and not ao_struct.get("error"):
                         st.subheader("AO — résumé structuré (Mistral)")
@@ -300,7 +295,6 @@ with tabs[1]:
                     st.caption(f"Méthode embeddings : **{method}** (cosine similarity).")
                     st.info("Matching basé sur **blocs** (skills-like / experience-like / domain-like / certification-like).")
 
-                    # Download section (same as before, but based on global score)
                     st.divider()
                     st.subheader("📥 Télécharger les meilleurs CVs")
 
@@ -386,7 +380,6 @@ with tabs[1]:
                                 key=f"cv_text_{row['cv_id']}"
                             )
 
-                            # Structured explanation (LLM)
                             if use_mistral_explain:
                                 st.markdown("**Explication IA (structurée)**")
                                 cv_struct = {}
@@ -396,7 +389,6 @@ with tabs[1]:
                                     except Exception:
                                         cv_struct = {}
 
-                                # fallback if AO struct failed
                                 ao_struct_for_explain = ao_struct if isinstance(ao_struct, dict) and not ao_struct.get("error") else {}
                                 score_payload = {
                                     "skills_like": float(row["skills_like"]),
@@ -421,6 +413,8 @@ with tabs[1]:
 
         except Exception as e:
             st.error(str(e))
+
+
 # ---------------------------
 # 3) Manage DB
 # ---------------------------
