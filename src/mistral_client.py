@@ -85,7 +85,7 @@ Return ONLY valid JSON with this schema:
     "skills_like": "explain which blocks drove the score",
     "experience_like": "explain which blocks drove the score",
     "domain_like": "explain which blocks drove the score",
-    "soft_like": "explain which blocks drove the score"
+    "certification_like": "explain which blocks drove the score"
   }}
 }}
 
