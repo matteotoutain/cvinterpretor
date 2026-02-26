@@ -13,30 +13,22 @@ except Exception:
     _HAS_ST = False
 
 
-# =============================
-# Embeddings model (SentenceTransformers)
-# =============================
-# We use multilingual-e5-base for robust FR/EN matching.
-# IMPORTANT: E5 expects instruction prefixes:
-#   - "query: " for the query (AO)
-#   - "passage: " for documents (CV)
-ST_MODEL_NAME = "intfloat/multilingual-e5-base"
-_ST_MODEL = None
+# =========================
+# Embedding model (E5)
+# =========================
+E5_MODEL_NAME = "intfloat/multilingual-e5-base"
 
 
 def normalize_ws(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
-def _get_st_model() -> "SentenceTransformer":
-    global _ST_MODEL
-    if _ST_MODEL is None:
-        _ST_MODEL = SentenceTransformer(ST_MODEL_NAME)
-    return _ST_MODEL
-
-
 def _embed_sentence_transformers(texts: List[str]) -> np.ndarray:
-    model = _get_st_model()
+    """
+    E5 best practice: prefix queries with 'query:' and documents with 'passage:'.
+    Here we don't know which are which, so compute_similarity() will build that properly.
+    """
+    model = SentenceTransformer(E5_MODEL_NAME)
     emb = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
     return np.asarray(emb)
 
@@ -51,23 +43,25 @@ def compute_similarity(query_text: str, documents: List[str]) -> Tuple[np.ndarra
     """
     Return (scores in [0..1], method).
     """
-    # Prepare inputs for E5 (query/passages)
-    # Keep it robust even if callers pass empty strings.
-    qtxt = normalize_ws(query_text)
-    docs = [normalize_ws(d) for d in (documents or [])]
+    query_text = normalize_ws(query_text)
+    documents = [normalize_ws(d) for d in documents]
 
-    # E5-style prefixing
-    texts = [f"query: {qtxt}"] + [f"passage: {d}" for d in docs]
     if _HAS_ST:
         try:
-            emb = _embed_sentence_transformers(texts)
+            # E5: query/passsage prefixes
+            q_in = [f"query: {query_text}"]
+            d_in = [f"passage: {d}" for d in documents]
+
+            emb = _embed_sentence_transformers(q_in + d_in)
             q = emb[0:1]
             d = emb[1:]
             scores = cosine_similarity(q, d)[0]
-            return scores.astype(float), f"sentence-transformers ({ST_MODEL_NAME})"
+            return scores.astype(float), f"sentence-transformers ({E5_MODEL_NAME})"
         except Exception:
             pass
 
+    # fallback tf-idf
+    texts = [query_text] + documents
     emb = _embed_tfidf(texts)
     q = emb[0:1]
     d = emb[1:]
@@ -84,7 +78,6 @@ def _as_list(x: Any) -> List[str]:
     if isinstance(x, list):
         return [normalize_ws(str(i)) for i in x if normalize_ws(str(i))]
     if isinstance(x, str):
-        # allow comma-separated
         parts = [normalize_ws(p) for p in x.split(",")]
         return [p for p in parts if p]
     return [normalize_ws(str(x))]
@@ -100,29 +93,23 @@ def build_ao_blocks(ao_struct: Dict[str, Any], ao_fallback_text: str = "") -> Di
 
     hard = ", ".join(_as_list(ao_struct.get("competences_techniques")))
     soft = ", ".join(_as_list(ao_struct.get("competences_metier")))
-    domain = normalize_ws(str(ao_struct.get("secteur") or ao_struct.get("secteur_principal") or ""))  # optional
+    domain = normalize_ws(str(ao_struct.get("secteur") or ao_struct.get("secteur_principal") or ""))
     exp = normalize_ws(str(ao_struct.get("experience_requise") or ""))
     langs = ", ".join(_as_list(ao_struct.get("langues_requises")))
 
-    # New category: certifications
-    certs = ", ".join(
-        _as_list(
-            ao_struct.get("certifications_requises")
-            or ao_struct.get("certifications")
-            or ao_struct.get("certification")
-        )
-    )
+    # NEW: certifications expected in AO (optional)
+    certs_req = ", ".join(_as_list(ao_struct.get("certifications_requises")))
 
-    # minimal fallback if some fields missing
-    if not (title or context or hard or soft or domain or exp or langs or certs):
+    if not (title or context or hard or soft or domain or exp or langs or certs_req):
         context = ao_fallback_text[:4000]
 
     return {
-        "skills_like": normalize_ws(" ".join([title, hard, langs])),
+        "skills_like": normalize_ws(" ".join([title, hard])),
         "experience_like": normalize_ws(" ".join([context, exp])),
         "domain_like": normalize_ws(" ".join([domain, title])),
-        "certification_like": normalize_ws(" ".join([certs])),
-        "full": normalize_ws(" ".join([title, context, hard, soft, certs, domain, exp, langs])),
+        # Replaces soft_like:
+        "certification_like": normalize_ws(" ".join([certs_req, soft, langs])),
+        "full": normalize_ws(" ".join([title, context, hard, soft, domain, exp, langs, certs_req])),
     }
 
 
@@ -137,18 +124,11 @@ def build_cv_blocks(cv_struct: Dict[str, Any], cv_fallback_text: str = "") -> Di
     tech = ", ".join(_as_list(cv_struct.get("technologies")))
     langs = ", ".join(_as_list(cv_struct.get("langues")))
 
-    # Optional richer fields if you extract them (recommended)
     hard_skills = ", ".join(_as_list(cv_struct.get("hard_skills")))
     soft_skills = ", ".join(_as_list(cv_struct.get("soft_skills")))
 
-    # New: certifications
-    certs = ", ".join(
-        _as_list(
-            cv_struct.get("certifications")
-            or cv_struct.get("certifs")
-            or cv_struct.get("certification")
-        )
-    )
+    # NEW: certifications field (list or comma-separated string)
+    certifications = ", ".join(_as_list(cv_struct.get("certifications")))
 
     experiences_txt = ""
     exps = cv_struct.get("experiences")
@@ -166,16 +146,16 @@ def build_cv_blocks(cv_struct: Dict[str, Any], cv_fallback_text: str = "") -> Di
         experiences_txt = normalize_ws(" | ".join([c for c in chunks if c]))
 
     if not experiences_txt:
-        # fallback: use main cv_text slice if no structured experience
         experiences_txt = normalize_ws(cv_fallback_text[:2500])
 
-    # if older extraction used only technologies/langues etc., keep it usable
     skills_like = normalize_ws(" ".join([role, tech, hard_skills]))
-    certification_like = normalize_ws(" ".join([certs]))
     domain_like = normalize_ws(" ".join([sector, role]))
     experience_like = normalize_ws(" ".join([experiences_txt, seniority]))
 
-    full = normalize_ws(" ".join([skills_like, experience_like, domain_like, certification_like, soft_skills, langs]))
+    # Replaces soft_like:
+    certification_like = normalize_ws(" ".join([certifications, soft_skills, langs]))
+
+    full = normalize_ws(" ".join([skills_like, experience_like, domain_like, certification_like]))
 
     return {
         "skills_like": skills_like,
