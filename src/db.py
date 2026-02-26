@@ -1,6 +1,6 @@
 import sqlite3
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict
 
 import pandas as pd
 
@@ -20,81 +20,42 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return column in cols
 
 
-def _ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: str = "TEXT") -> None:
-    if not _column_exists(conn, table, column):
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype};")
-        conn.commit()
-
-
 def init_db(conn: sqlite3.Connection) -> None:
     sql = f"""
     CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
         cv_id TEXT PRIMARY KEY,
         filename TEXT,
-
         nom TEXT,
         role_principal TEXT,
-
-        -- Raw seniority phrasing + normalized label for filtering
-        seniorite_raw TEXT,
-        seniorite_label TEXT,
-
+        seniorite TEXT,
         secteur_principal TEXT,
-
-        -- Stored as comma-separated strings for easy UI/filtering (keep it simple)
-        tech_skills TEXT,
-        domain_knowledge TEXT,
-        certifications TEXT,
         technologies TEXT,
         langues TEXT,
-
         cv_text TEXT,
-
-        -- Raw extracted JSON + cleaned keyword pack JSON (stringified)
-        cv_struct_json TEXT,
-        cv_keywords_json TEXT
+        cv_struct_json TEXT
     );
     """
     conn.execute(sql)
     conn.commit()
 
-    # Migrations for older DBs
-    _ensure_column(conn, TABLE_NAME, "cv_struct_json", "TEXT")
-    _ensure_column(conn, TABLE_NAME, "cv_keywords_json", "TEXT")
-
-    _ensure_column(conn, TABLE_NAME, "seniorite_raw", "TEXT")
-    _ensure_column(conn, TABLE_NAME, "seniorite_label", "TEXT")
-
-    _ensure_column(conn, TABLE_NAME, "tech_skills", "TEXT")
-    _ensure_column(conn, TABLE_NAME, "domain_knowledge", "TEXT")
-    _ensure_column(conn, TABLE_NAME, "certifications", "TEXT")
-
-    # legacy columns (keep if present)
-    _ensure_column(conn, TABLE_NAME, "technologies", "TEXT")
-    _ensure_column(conn, TABLE_NAME, "langues", "TEXT")
-    _ensure_column(conn, TABLE_NAME, "secteur_principal", "TEXT")
-    _ensure_column(conn, TABLE_NAME, "cv_text", "TEXT")
-    _ensure_column(conn, TABLE_NAME, "nom", "TEXT")
-    _ensure_column(conn, TABLE_NAME, "role_principal", "TEXT")
+    # Migration: add cv_struct_json if missing in older DB
+    if not _column_exists(conn, TABLE_NAME, "cv_struct_json"):
+        conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN cv_struct_json TEXT;")
+        conn.commit()
 
 
-def upsert_cv(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
+def upsert_cv(conn: sqlite3.Connection, row: Dict) -> None:
     cols = [
         "cv_id",
         "filename",
         "nom",
         "role_principal",
-        "seniorite_raw",
-        "seniorite_label",
+        "seniorite",
         "secteur_principal",
-        "tech_skills",
-        "domain_knowledge",
-        "certifications",
         "technologies",
         "langues",
         "cv_text",
         "cv_struct_json",
-        "cv_keywords_json",
     ]
     values = [row.get(c) for c in cols]
     placeholders = ",".join(["?"] * len(cols))
@@ -106,17 +67,12 @@ def upsert_cv(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
         filename=excluded.filename,
         nom=excluded.nom,
         role_principal=excluded.role_principal,
-        seniorite_raw=excluded.seniorite_raw,
-        seniorite_label=excluded.seniorite_label,
+        seniorite=excluded.seniorite,
         secteur_principal=excluded.secteur_principal,
-        tech_skills=excluded.tech_skills,
-        domain_knowledge=excluded.domain_knowledge,
-        certifications=excluded.certifications,
         technologies=excluded.technologies,
         langues=excluded.langues,
         cv_text=excluded.cv_text,
-        cv_struct_json=excluded.cv_struct_json,
-        cv_keywords_json=excluded.cv_keywords_json;
+        cv_struct_json=excluded.cv_struct_json;
     """
     conn.execute(sql, values)
     conn.commit()
@@ -125,11 +81,7 @@ def upsert_cv(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
 def list_cvs(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query(
         f"""
-        SELECT
-          cv_id, filename, nom, role_principal,
-          seniorite_label, secteur_principal,
-          tech_skills, domain_knowledge, certifications,
-          technologies, langues
+        SELECT cv_id, filename, nom, role_principal, seniorite, secteur_principal, technologies, langues
         FROM {TABLE_NAME}
         ORDER BY filename
         """,
@@ -140,12 +92,7 @@ def list_cvs(conn: sqlite3.Connection) -> pd.DataFrame:
 def get_cv_texts(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query(
         f"""
-        SELECT
-          cv_id, filename, nom, role_principal,
-          seniorite_raw, seniorite_label, secteur_principal,
-          tech_skills, domain_knowledge, certifications,
-          technologies, langues,
-          cv_text, cv_struct_json, cv_keywords_json
+        SELECT cv_id, filename, nom, role_principal, seniorite, secteur_principal, technologies, langues, cv_text, cv_struct_json
         FROM {TABLE_NAME}
         """,
         conn,
