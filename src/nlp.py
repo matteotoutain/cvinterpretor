@@ -110,8 +110,8 @@ def build_ao_blocks(ao_struct: Dict[str, Any], ao_fallback_text: str = "") -> Di
         "experience_like": normalize_ws(" ".join([context, exp])),
         "domain_like": normalize_ws(" ".join([domain, title])),
         # Replaces soft_like:
-        "certification_like": normalize_ws(" ".join([certs_req, soft, langs])),
-        "full": normalize_ws(" ".join([title, context, hard, soft, domain, exp, langs, certs_req])),
+        "certification_like": normalize_ws(" ".join([certs_req, langs])),
+        "full": normalize_ws(" ".join([title, context, hard, domain, exp, langs, certs_req])),
     }
 
 
@@ -155,7 +155,7 @@ def build_cv_blocks(cv_struct: Dict[str, Any], cv_fallback_text: str = "") -> Di
     experience_like = normalize_ws(" ".join([experiences_txt, seniority]))
 
     # Replaces soft_like:
-    certification_like = normalize_ws(" ".join([certifications, soft_skills, langs]))
+    certification_like = normalize_ws(" ".join([certifications, langs]))
 
     full = normalize_ws(" ".join([skills_like, experience_like, domain_like, certification_like]))
 
