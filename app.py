@@ -99,54 +99,55 @@ with tabs[0]:
                     }
 
                     if use_mistral:
-                        cv_extraction_prompt = (
-                            "Extract the following detailed information from the provided CV text, translated in english. 
-                            You MUST output ONLY valid JSON (no markdown, no extra text).
+                        cv_extraction_prompt = """
+Extract the following detailed information from the provided CV text and translate extracted values into English.
+
+You MUST output ONLY valid JSON (no markdown, no extra text).
 
 CRITICAL RULE: Categories must be STRICTLY SEPARATED ("airtight buckets").
-Do NOT copy the same content across multiple fields.
-Do NOT derive or infer items from other categories.
+- Do NOT copy the same content across multiple fields.
+- Do NOT derive or infer items from other categories.
 
 Allowed content per category:
 - experiences: ONLY concrete professional/academic experiences (missions/projects/roles). Each experience must be an actual described experience.
-  - It can include tools/stack ONLY if explicitly written as used in that experience (not global skills).
+  - It may include tools/stack ONLY if explicitly written as used in that specific experience (not global skills).
 - hard_skills / technologies: ONLY explicit skills/technologies named as skills/tools (e.g., "Python", "Salesforce", "SQL").
   - DO NOT paste experience descriptions here.
 - soft_skills: ONLY explicit behavioral/soft skills (e.g., "communication", "leadership").
   - DO NOT infer soft skills from role descriptions.
 - certifications: ONLY explicit certification names (e.g., "PMP", "Salesforce Certified Associate", "AWS SAA").
-  - DO NOT include trainings, courses, degrees unless clearly stated as a certification.
+  - DO NOT include trainings, courses, or degrees unless clearly stated as a certification.
 - secteur_principal / secteur: ONLY the industry/domain (e.g., banking, insurance, retail). Not tools.
 - langues: ONLY languages.
 
 NO INFERENCE:
-- If not explicitly stated in text, output null or an empty list.
-- If ambiguous, output null/empty and add it to a separate "uncertainties" list if present in the schema.
+- If not explicitly stated in the text, output null (for scalars) or [] (for lists).
 
 DEDUPLICATION:
-- Do not repeat the same token across lists unless it is truly a different item (e.g., "AWS" vs "AWS SAA")."
-                            "Output the result as a single JSON object. If a field is not found, use `null`.\n\n"
-                            "{\n"
-                            '  "nom": "Full name of the person",\n'
-                            '  "role_principal": "Main role or title",\n'
-                            '  "seniorite": "Seniority level or years of experience if present",\n'
-                            '  "secteur_principal": "Main industry sector(s), comma-separated",\n'
-                            '  "technologies": "Key tools/tech mentioned, comma-separated",\n'
-                            '  "langues": "Languages, comma-separated",\n'
-                            '  "certifications": ["List of certifications (e.g., Salesforce Certified Associate, PMP, AWS, Azure...)"],\n'
-                            '  "hard_skills": ["List of hard skills / technologies as items"],\n'
-                            '  "soft_skills": ["List of soft skills as items"],\n'
-                            '  "experiences": [\n'
-                            '     {\n'
-                            '       "mission": "Short mission title/summary",\n'
-                            '       "secteur": "Domain/industry if stated",\n'
-                            '       "stack": ["Tech stack used on that mission"],\n'
-                            '       "duree": "Duration if stated"\n'
-                            '     }\n'
-                            "  ],\n"
-                            '  "cv_text": "The CV main text, focusing on experience and key skills."\n'
-                            "}\n"
-                        )
+- Do not repeat the same token across lists unless it is truly a different item (e.g., "AWS" vs "AWS SAA").
+
+Output the result as a single JSON object with the following schema:
+{
+  "nom": "Full name of the person",
+  "role_principal": "Main role or title",
+  "seniorite": "Seniority level or years of experience if present",
+  "secteur_principal": "Main industry sector(s), comma-separated",
+  "technologies": "Key tools/tech mentioned, comma-separated",
+  "langues": "Languages, comma-separated",
+  "certifications": ["List of certifications (e.g., Salesforce Certified Associate, PMP, AWS, Azure...)"],
+  "hard_skills": ["List of hard skills / technologies as items"],
+  "soft_skills": ["List of soft skills as items"],
+  "experiences": [
+    {
+      "mission": "Short mission title/summary",
+      "secteur": "Domain/industry if stated",
+      "stack": ["Tech stack used on that mission"],
+      "duree": "Duration if stated"
+    }
+  ],
+  "cv_text": "The CV main text, focusing on experience and key skills."
+}
+"""
 
                         extracted = call_mistral_json_extraction(
                             text_input=text,
