@@ -100,7 +100,31 @@ with tabs[0]:
 
                     if use_mistral:
                         cv_extraction_prompt = (
-                            "Extract the following detailed information from the provided CV text, translated in english. "
+                            "Extract the following detailed information from the provided CV text, translated in english. 
+                            You MUST output ONLY valid JSON (no markdown, no extra text).
+
+CRITICAL RULE: Categories must be STRICTLY SEPARATED ("airtight buckets").
+Do NOT copy the same content across multiple fields.
+Do NOT derive or infer items from other categories.
+
+Allowed content per category:
+- experiences: ONLY concrete professional/academic experiences (missions/projects/roles). Each experience must be an actual described experience.
+  - It can include tools/stack ONLY if explicitly written as used in that experience (not global skills).
+- hard_skills / technologies: ONLY explicit skills/technologies named as skills/tools (e.g., "Python", "Salesforce", "SQL").
+  - DO NOT paste experience descriptions here.
+- soft_skills: ONLY explicit behavioral/soft skills (e.g., "communication", "leadership").
+  - DO NOT infer soft skills from role descriptions.
+- certifications: ONLY explicit certification names (e.g., "PMP", "Salesforce Certified Associate", "AWS SAA").
+  - DO NOT include trainings, courses, degrees unless clearly stated as a certification.
+- secteur_principal / secteur: ONLY the industry/domain (e.g., banking, insurance, retail). Not tools.
+- langues: ONLY languages.
+
+NO INFERENCE:
+- If not explicitly stated in text, output null or an empty list.
+- If ambiguous, output null/empty and add it to a separate "uncertainties" list if present in the schema.
+
+DEDUPLICATION:
+- Do not repeat the same token across lists unless it is truly a different item (e.g., "AWS" vs "AWS SAA")."
                             "Output the result as a single JSON object. If a field is not found, use `null`.\n\n"
                             "{\n"
                             '  "nom": "Full name of the person",\n'
