@@ -537,30 +537,30 @@ with tabs[2]:
                     st.session_state.confirm_clear = True
 
 
-# =========================
-# DEBUG DATABASE VIEW
-# =========================
 import json
-from src.db import connect
+import streamlit as st
+from src.db import connect, init_db, TABLE_NAME
 
 with st.expander("🔍 Debug – View Structured CV JSON in DB"):
 
     conn = connect()
+    init_db(conn)  # important: garantit que la table existe
+
     c = conn.cursor()
-    c.execute("SELECT id, filename, structured_json FROM cvs")
+    c.execute(f"SELECT cv_id, filename, cv_struct_json FROM {TABLE_NAME}")
     rows = c.fetchall()
 
     if not rows:
         st.info("No CVs in database.")
     else:
-        for row in rows:
-            cv_id, filename, structured_json = row
+        for cv_id, filename, cv_struct_json in rows:
             st.markdown(f"### 📄 {filename} (ID: {cv_id})")
 
             try:
-                data = json.loads(structured_json)
+                data = json.loads(cv_struct_json) if cv_struct_json else None
                 st.json(data)
             except Exception as e:
                 st.error(f"JSON parsing error: {e}")
+                st.text(cv_struct_json)
 
     conn.close()
