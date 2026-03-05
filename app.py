@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from src.config import APP_NAME
 from src.db import connect, init_db, upsert_cv, list_cvs, get_cv_texts, delete_cv
 from src.extract import extract_text_generic, stable_id_from_bytes
-from src.nlp import build_ao_blocks, build_cv_blocks, score_blocks, verdict_from_score
+from src.nlp import build_ao_blocks, build_cv_blocks, score_blocks_enhanced, verdict_from_score
 
 from src.mistral_client import (
     call_mistral_json_extraction,
@@ -18,9 +18,9 @@ from src.mistral_client import (
 )
 
 
-def create_radar_chart(skills_like, experience_like, domain_like, certification_like, global_score):
-    categories = ['Skills-like', 'Experience-like', 'Domain-like', 'Certification-like', 'Global']
-    values = [skills_like, experience_like, domain_like, certification_like, global_score]
+def create_radar_chart(nlp_score, skills_score, seniority_score, domain_score, language_score, global_score):
+    categories = ['NLP', 'Skills', 'Seniority', 'Domain', 'Language', 'Global']
+    values = [nlp_score, skills_score, seniority_score, domain_score, language_score, global_score]
 
     fig = go.Figure(data=go.Scatterpolar(
         r=values,
@@ -36,7 +36,7 @@ def create_radar_chart(skills_like, experience_like, domain_like, certification_
         showlegend=False,
         height=380,
         margin=dict(l=40, r=40, t=60, b=40),
-        title=dict(text='Profil de correspondance (par blocs)', x=0.5, xanchor='center')
+        title=dict(text='Score Breakdown (NLP + Non-NLP Features)', x=0.5, xanchor='center')
     )
     return fig
 
@@ -99,7 +99,7 @@ with tabs[0]:
                     }
 
                     if use_mistral:
-                        cv_extraction_prompt = """
+                        cv_extraction_prompt = f"""
 Extract the following detailed information from the provided CV text and translate extracted values into English.
 
 You MUST output ONLY valid JSON (no markdown, no extra text).
@@ -108,10 +108,22 @@ CRITICAL RULE: Categories must be STRICTLY SEPARATED ("airtight buckets").
 - Do NOT copy the same content across multiple fields.
 - Do NOT derive or infer items from other categories.
 
+STANDARDIZED SKILLS REFERENCE (use these exact terms when extracting technologies):
+Programming: python, java, c++, c#, javascript, typescript, go, rust, php, ruby, scala, kotlin, swift, objective-c, perl, r, matlab, lua, bash, shell, powershell, groovy, clojure, haskell, elixir
+Web: django, flask, fastapi, react, angular, vue.js, node.js, express.js, spring, spring boot, asp.net, laravel, ruby on rails, next.js, nuxt.js, svelte, ember.js, backbone.js, meteor
+Databases: sql, postgresql, mysql, mongodb, elasticsearch, cassandra, redis, dynamodb, oracle, sql server, mariadb, firebase, neo4j, couchdb, influxdb, cockroachdb
+Cloud/DevOps: aws, azure, gcp, docker, kubernetes, terraform, ansible, jenkins, gitlab ci, github actions, bitbucket, circleci, travis ci, heroku, netlify, cloudformation, sam, serverless, lambda, ec2, s3, ecs, eks
+Data/ML: machine learning, deep learning, neural networks, tensorflow, pytorch, scikit-learn, pandas, numpy, apache spark, hadoop, kafka, airflow, bigquery, snowflake, tableau, power bi, looker, dbt, data analytics
+DevOps/Infrastructure: linux, windows, macos, nginx, apache, ssl, tls, vpn, firewall, monitoring, prometheus, grafana, elk stack, datadog, new relic
+Tools: git, svn, jira, confluence, trello, slack, asana
+APIs: rest, graphql, grpc, soap, mqtt, amqp, rabbitmq, activemq
+Testing: junit, pytest, mocha, jasmine, selenium, cypress, testng, cucumber, postman, loadrunner, jmeter
+Mobile: ios, android, flutter, react native, xamarin, cordova
+
 Allowed content per category:
 - experiences: ONLY concrete professional/academic experiences (missions/projects/roles). Each experience must be an actual described experience.
   - It may include tools/stack ONLY if explicitly written as used in that specific experience (not global skills).
-- hard_skills / technologies: ONLY explicit skills/technologies named as skills/tools (e.g., "Python", "Salesforce", "SQL").
+- hard_skills / technologies: ONLY explicit skills/technologies from the STANDARDIZED SKILLS list above. Use exact standardized names.
   - DO NOT paste experience descriptions here.
 - soft_skills: ONLY explicit behavioral/soft skills (e.g., "communication", "leadership").
   - DO NOT infer soft skills from role descriptions.
@@ -127,26 +139,26 @@ DEDUPLICATION:
 - Do not repeat the same token across lists unless it is truly a different item (e.g., "AWS" vs "AWS SAA").
 
 Output the result as a single JSON object with the following schema:
-{
+{{
   "nom": "Full name of the person",
   "role_principal": "Main role or title",
-  "seniorite": "Seniority level or years of experience if present",
+  "seniorite": "Seniority level (one of: Junior, Senior, Manager) or years of experience if present",
   "secteur_principal": "Main industry sector(s), comma-separated",
-  "technologies": "Key tools/tech mentioned, comma-separated",
+  "technologies": "Key tools/tech from STANDARDIZED SKILLS list, comma-separated",
   "langues": "Languages, comma-separated",
   "certifications": ["List of certifications (e.g., Salesforce Certified Associate, PMP, AWS, Azure...)"],
-  "hard_skills": ["List of hard skills / technologies as items"],
+  "hard_skills": ["List of hard skills / technologies as items from STANDARDIZED SKILLS"],
   "soft_skills": ["List of soft skills as items"],
   "experiences": [
-    {
+    {{
       "mission": "Short mission title/summary",
       "secteur": "Domain/industry if stated",
       "stack": ["Tech stack used on that mission"],
       "duree": "Duration if stated"
-    }
+    }}
   ],
   "cv_text": "The CV main text, focusing on experience and key skills."
-}
+}}
 """
 
                         extracted = call_mistral_json_extraction(
@@ -225,13 +237,24 @@ with tabs[1]:
                         ao_extraction_prompt = (
                             "Extract the following detailed information from the provided AO text, translated in english. "
                             "Output the result as a single JSON object. If a field is not found, use `null`.\n\n"
+                            "STANDARDIZED SKILLS REFERENCE (use these exact terms for technical skills):\n"
+                            "Programming: python, java, c++, c#, javascript, typescript, go, rust, php, ruby, scala, kotlin, swift, objective-c, perl, r, matlab, lua, bash, shell, powershell, groovy, clojure, haskell, elixir\n"
+                            "Web: django, flask, fastapi, react, angular, vue.js, node.js, express.js, spring, spring boot, asp.net, laravel, ruby on rails, next.js, nuxt.js, svelte, ember.js, backbone.js, meteor\n"
+                            "Databases: sql, postgresql, mysql, mongodb, elasticsearch, cassandra, redis, dynamodb, oracle, sql server, mariadb, firebase, neo4j, couchdb, influxdb, cockroachdb\n"
+                            "Cloud/DevOps: aws, azure, gcp, docker, kubernetes, terraform, ansible, jenkins, gitlab ci, github actions, bitbucket, circleci, travis ci, heroku, netlify, cloudformation, sam, serverless, lambda, ec2, s3, ecs, eks\n"
+                            "Data/ML: machine learning, deep learning, neural networks, tensorflow, pytorch, scikit-learn, pandas, numpy, apache spark, hadoop, kafka, airflow, bigquery, snowflake, tableau, power bi, looker, dbt, data analytics\n"
+                            "DevOps/Infrastructure: linux, windows, macos, nginx, apache, ssl, tls, vpn, firewall, monitoring, prometheus, grafana, elk stack, datadog, new relic\n"
+                            "Tools: git, svn, jira, confluence, trello, slack, asana\n"
+                            "APIs: rest, graphql, grpc, soap, mqtt, amqp, rabbitmq, activemq\n"
+                            "Testing: junit, pytest, mocha, jasmine, selenium, cypress, testng, cucumber, postman, loadrunner, jmeter\n"
+                            "Mobile: ios, android, flutter, react native, xamarin, cordova\n\n"
                             "{\n"
                             '  "titre_poste": "Job title or main role for the mission",\n'
                             '  "contexte_mission": "Brief summary of the mission context and objectives",\n'
-                            '  "competences_techniques": ["List of required technical skills"],\n'
+                            '  "competences_techniques": ["List of required technical skills from STANDARDIZED SKILLS list"],\n'
                             '  "competences_metier": ["List of business/soft skills expected"],\n'
                             '  "secteur": "Industry domain if stated (banking, insurance, public sector, etc.)",\n'
-                            '  "experience_requise": "Required experience level or years",\n'
+                            '  "experience_requise": "Required seniority level (one of: Junior, Senior, Manager) or years of experience",\n'
                             '  "langues_requises": ["Languages required"],\n'
                             '  "certifications_requises": ["Certifications explicitly required or strongly desired"]\n'
                             "}\n"
@@ -270,7 +293,11 @@ with tabs[1]:
                                 cv_struct = {}
 
                             cv_blocks = build_cv_blocks(cv_struct, cv_fallback_text=cv_text)
-                            scores, method = score_blocks(ao_blocks, cv_blocks)
+                            
+                            # Use enhanced scoring with non-NLP features
+                            scores, method = score_blocks_enhanced(
+                                ao_blocks, cv_blocks, ao_struct or {}, cv_struct
+                            )
                             method_used = method_used or method
 
                             rows.append({
@@ -284,11 +311,16 @@ with tabs[1]:
                                 "langues": r.get("langues"),
                                 "cv_text": cv_text,
                                 "cv_struct_json": cv_struct_json,
-                                "skills_like": scores["skills_like"],
-                                "experience_like": scores["experience_like"],
-                                "domain_like": scores["domain_like"],
-                                "certification_like": scores["certification_like"],
+                                # New enhanced scoring fields
+                                "nlp_score": scores["nlp_score"],
+                                "skills_score": scores["skills_score"],
+                                "seniority_score": scores["seniority_score"],
+                                "domain_score": scores["domain_score"],
+                                "language_score": scores["language_score"],
                                 "global_score": scores["global_score"],
+                                "skill_details": scores["skill_details"],
+                                "ao_seniority": scores.get("ao_seniority", ""),
+                                "cv_seniority": scores.get("cv_seniority", ""),
                                 "verdict": verdict_from_score(scores["global_score"]),
                             })
 
@@ -317,8 +349,8 @@ with tabs[1]:
                     elif ao_struct and isinstance(ao_struct, dict) and ao_struct.get("error"):
                         st.warning(f"⚠️ Mistral AO extraction failed: {ao_struct.get('error')}")
 
-                    st.caption(f"Méthode embeddings : **{method}** (cosine similarity).")
-                    st.info("Matching basé sur **blocs** (skills-like / experience-like / domain-like / certification-like).")
+                    st.caption(f"Méthode embeddings : **{method}** (cosine similarity avec features structurelles).")
+                    st.info("Matching basé sur : **NLP (50%)** + **Skills (20%)** + **Seniority (15%)** + **Domain (10%)** + **Language (5%)**.")
 
                     st.divider()
                     st.subheader("📥 Télécharger les meilleurs CVs")
@@ -361,28 +393,64 @@ with tabs[1]:
                             title = f"⭐ {title}"
 
                         with st.expander(title, expanded=(idx <= 3)):
-                            c1, c2, c3, c4, c5 = st.columns(5)
+                            # Score breakdown (6 columns)
+                            c1, c2, c3, c4, c5, c6 = st.columns(6)
                             with c1:
-                                st.metric("Skills-like", f"{row['skills_like']:.3f}")
+                                st.metric("NLP", f"{row['nlp_score']:.3f}")
                             with c2:
-                                st.metric("Experience-like", f"{row['experience_like']:.3f}")
+                                st.metric("Skills", f"{row['skills_score']:.3f}")
                             with c3:
-                                st.metric("Domain-like", f"{row['domain_like']:.3f}")
+                                st.metric("Seniority", f"{row['seniority_score']:.3f}")
                             with c4:
-                                st.metric("Certification-like", f"{row['certification_like']:.3f}")
+                                st.metric("Domain", f"{row['domain_score']:.3f}")
                             with c5:
+                                st.metric("Language", f"{row['language_score']:.3f}")
+                            with c6:
                                 st.metric("Global", f"{row['global_score']:.3f}")
 
                             st.plotly_chart(
                                 create_radar_chart(
-                                    row["skills_like"],
-                                    row["experience_like"],
-                                    row["domain_like"],
-                                    row["certification_like"],
+                                    row["nlp_score"],
+                                    row["skills_score"],
+                                    row["seniority_score"],
+                                    row["domain_score"],
+                                    row["language_score"],
                                     row["global_score"],
                                 ),
                                 use_container_width=True
                             )
+
+                            # Skill Analysis
+                            skill_details = row.get("skill_details", {})
+                            if skill_details:
+                                st.markdown("**🎯 Skill Analysis**")
+                                skill_cols = st.columns([2, 1, 1])
+                                
+                                with skill_cols[0]:
+                                    st.write(f"**Overlap Ratio**: {skill_details.get('overlap_ratio', 0):.1%}")
+                                    if skill_details.get("overlap"):
+                                        st.write(f"✓ Found: {', '.join(skill_details['overlap'][:5])}" + 
+                                                ("..." if len(skill_details['overlap']) > 5 else ""))
+                                
+                                with skill_cols[1]:
+                                    st.write(f"**Required**: {len(skill_details.get('ao_skills', []))}")
+                                
+                                with skill_cols[2]:
+                                    st.write(f"**Has**: {len(skill_details.get('cv_skills', []))}")
+                                
+                                if skill_details.get("missing"):
+                                    st.warning(f"⚠️ Missing skills: {', '.join(skill_details['missing'][:5])}" +
+                                             ("..." if len(skill_details['missing']) > 5 else ""))
+
+                            # Seniority & Domain
+                            st.markdown("**📋 Seniority & Domain**")
+                            sren_cols = st.columns([1, 1, 1])
+                            with sren_cols[0]:
+                                st.write(f"**AO Seniority**: {row['ao_seniority'] or '—'}")
+                            with sren_cols[1]:
+                                st.write(f"**CV Seniority**: {row['cv_seniority'] or '—'}")
+                            with sren_cols[2]:
+                                st.write(f"**Seniority Score**: {row['seniority_score']:.3f}")
 
                             st.markdown("**Info CV**")
                             info_data = {
@@ -415,12 +483,16 @@ with tabs[1]:
                                         cv_struct = {}
 
                                 ao_struct_for_explain = ao_struct if isinstance(ao_struct, dict) and not ao_struct.get("error") else {}
+                                
+                                # Use new scoring fields for explanation payload
                                 score_payload = {
-                                    "skills_like": float(row["skills_like"]),
-                                    "experience_like": float(row["experience_like"]),
-                                    "domain_like": float(row["domain_like"]),
-                                    "certification_like": float(row["certification_like"]),
+                                    "nlp_score": float(row["nlp_score"]),
+                                    "skills_score": float(row["skills_score"]),
+                                    "seniority_score": float(row["seniority_score"]),
+                                    "domain_score": float(row["domain_score"]),
+                                    "language_score": float(row["language_score"]),
                                     "global_score": float(row["global_score"]),
+                                    "skill_details": row.get("skill_details", {}),
                                     "verdict": row["verdict"],
                                 }
 
