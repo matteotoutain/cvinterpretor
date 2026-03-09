@@ -75,10 +75,71 @@ STANDARDIZED_SKILLS = {
     "leadership", "communication", "teamwork", "agile", "scrum", "kanban",
     "project management", "problem solving", "critical thinking", "creativity",
     "adaptability", "time management", "mentoring", "coaching",
+
+    # Languages
+    "english", "french", "spanish", "german", "italian", "portuguese",
+    "dutch", "russian", "chinese", "japanese", "korean", "arabic",
+    "hebrew", "greek", "turkish", "polish", "czech", "hungarian",
+    "romanian", "bulgarian", "swedish", "norwegian", "danish", "finnish",
+    "thai", "vietnamese", "indonesian", "malay", "tagalog", "swahili",
 }
 
 # Legacy SKILL_DICT for backward compatibility (maps to standardized)
 SKILL_DICT = STANDARDIZED_SKILLS
+
+# =========================
+# Standardized Consulting Domains
+# =========================
+CONSULTING_DOMAINS = {
+    # Core consulting domains
+    "banking", "finance", "insurance", "retail", "e-commerce", "media", "luxury",
+    "energy", "oil", "gas", "utilities", "industry", "manufacturing", "automotive",
+    "telecom", "telecommunications", "technology", "it", "software", "healthcare",
+    "pharmaceuticals", "life sciences", "public sector", "government", "defense",
+    "aerospace", "transportation", "logistics", "real estate", "construction",
+    "chemicals", "mining", "agriculture", "food", "beverages", "consumer goods",
+    "travel", "hospitality", "sports", "entertainment", "education", "non-profit",
+    "ngo", "consulting", "professional services", "legal", "accounting", "audit",
+}
+
+# Domain normalization mapping (common variations → standardized)
+DOMAIN_NORMALIZATION = {
+    "banque": "banking",
+    "banques": "banking", 
+    "finances": "finance",
+    "assurance": "insurance",
+    "assurances": "insurance",
+    "retail": "retail",
+    "commerce": "retail",
+    "distribution": "retail",
+    "médias": "media",
+    "média": "media",
+    "luxe": "luxury",
+    "énergie": "energy",
+    "industrie": "industry",
+    "télécom": "telecom",
+    "télécommunications": "telecommunications",
+    "santé": "healthcare",
+    "pharma": "pharmaceuticals",
+    "secteur public": "public sector",
+    "gouvernement": "government",
+    "défense": "defense",
+    "aéronautique": "aerospace",
+    "transport": "transportation",
+    "immobilier": "real estate",
+    "bâtiment": "construction",
+    "chimie": "chemicals",
+    "agroalimentaire": "food",
+    "biens de consommation": "consumer goods",
+    "tourisme": "travel",
+    "hôtellerie": "hospitality",
+    "sport": "sports",
+    "divertissement": "entertainment",
+    "éducation": "education",
+    "juridique": "legal",
+    "comptable": "accounting",
+    "audit": "audit",
+}
 
 # Skill normalization mapping (common variations → standardized)
 SKILL_NORMALIZATION = {
@@ -307,30 +368,74 @@ def _score_keyword_presence(required_text: str, candidate_text: str) -> float:
     return min(1.0, found_count / len(required_words))
 
 
-def _calculate_domain_match(ao_domain: str, cv_domain: str) -> float:
+def normalize_domain(domain: str) -> str:
     """
-    Simple domain/sector matching.
-    Returns 1.0 for exact match, 0.3 for no match (non-zero for flexibility).
+    Normalize a domain to its standardized consulting domain form.
     """
-    if not ao_domain or not cv_domain:
-        return 0.5  # Neutral if missing
+    if not domain:
+        return ""
     
-    ao_d = normalize_ws(ao_domain).lower()
-    cv_d = normalize_ws(cv_domain).lower()
+    domain_lower = domain.lower().strip()
     
-    if ao_d == cv_d:
-        return 1.0
+    # Check if it's already standardized
+    if domain_lower in CONSULTING_DOMAINS:
+        return domain_lower
     
-    # Check for overlap (e.g., "IT" in "IT Services")
-    if ao_d in cv_d or cv_d in ao_d:
-        return 0.75
+    # Check normalization mapping
+    return DOMAIN_NORMALIZATION.get(domain_lower, domain_lower)
+
+
+def _calculate_domain_match(ao_domain: str, cv_domains: List[str]) -> float:
+    """
+    Domain matching using only standardized consulting domains extracted by Mistral.
+    Handles multiple domains for CV. Benefits candidates with the required domain or related domains.
+    Returns 1.0 for exact match, 0.8 for related domains, 0.1 otherwise.
+    """
+    if not ao_domain or not cv_domains:
+        return 0.1  # Low score if missing
     
-    # Semantic similarity via compute_similarity
-    scores, _ = compute_similarity(ao_d, [cv_d])
-    domain_sim = float(scores[0])
+    ao_normalized = normalize_domain(ao_domain)
+    if not ao_normalized:
+        return 0.1
     
-    # Threshold: only count as match if > 0.5, else penalize
-    return domain_sim if domain_sim > 0.5 else 0.3
+    best_score = 0.1
+    for cv_dom in cv_domains:
+        cv_norm = normalize_domain(cv_dom)
+        if not cv_norm:
+            continue
+        if cv_norm == ao_normalized:
+            return 1.0  # Exact match, highest priority
+        if _are_related_domains(cv_norm, ao_normalized):
+            best_score = max(best_score, 0.8)  # Related domain
+    
+    return best_score
+
+
+def _are_related_domains(domain1: str, domain2: str) -> bool:
+    """
+    Check if two standardized consulting domains are related.
+    """
+    related_groups = [
+        {"banking", "finance", "insurance"},  # Financial services
+        {"telecom", "telecommunications", "technology", "it", "software"},  # Tech/Telco
+        {"energy", "oil", "gas", "utilities"},  # Energy sector
+        {"retail", "e-commerce", "consumer goods"},  # Consumer/retail
+        {"healthcare", "pharmaceuticals", "life sciences"},  # Healthcare
+        {"public sector", "government", "defense"},  # Public sector
+        {"industry", "manufacturing", "automotive", "chemicals"},  # Industrial
+        {"transportation", "logistics", "aerospace"},  # Transportation
+        {"media", "entertainment", "sports"},  # Media/entertainment
+        {"real estate", "construction"},  # Property/construction
+        {"travel", "hospitality"},  # Travel/hospitality
+        {"education", "non-profit", "ngo"},  # Education/social
+        {"legal", "accounting", "audit", "consulting", "professional services"},  # Professional services
+    ]
+    
+    for group in related_groups:
+        if domain1 in group and domain2 in group:
+            return True
+    
+    return False
 
 
 def _embed_sentence_transformers(texts: List[str]) -> np.ndarray:
@@ -528,52 +633,51 @@ def score_blocks_enhanced(
     cv_blocks: Dict[str, str],
     ao_struct: Dict[str, Any] = None,
     cv_struct: Dict[str, Any] = None,
-    nlp_weight: float = 0.50,
+    nlp_weight: float = 0.55,
+    skills_weight: float = 0.30,
+    domain_weight: float = 0.15,
 ) -> Tuple[Dict[str, Any], str]:
     """
     Enhanced scoring combining NLP similarity + non-NLP features:
     - Skill overlap ratio (exact keyword matching)
-    - Seniority alignment (experience leveling)
     - Domain/sector match
-    - Language requirement coverage
+    
+    Seniority and Language are NOT used in scoring but are returned for filtering/display.
+    
+    Parameters:
+        nlp_weight: NLP score weight (default 0.55)
+        skills_weight: Skills score weight (default 0.30)
+        domain_weight: Domain score weight (default 0.15)
     
     Returns:
         ({
             'nlp_score': float (0-1),
             'skills_score': float (0-1),
-            'seniority_score': float (0-1),
             'domain_score': float (0-1),
-            'language_score': float (0-1),
             'global_score': float (0-1),
+            'seniority_score': float (0-1) [for filtering only, not in global score],
             'skill_details': {
                 'ao_skills': List[str],
                 'cv_skills': List[str],
                 'overlap': List[str],
                 'missing': List[str],
                 'overlap_ratio': float,
-            }
+            },
+            'ao_seniority': str,
+            'cv_seniority': str,
         }, method_str)
     """
     ao_struct = ao_struct or {}
     cv_struct = cv_struct or {}
     
-    # ===== NLP Score (50% default weight) =====
+    # ===== NLP Score (Default 55% weight) =====
     nlp_scores, method_used = score_blocks(ao_blocks, cv_blocks)
     nlp_score = nlp_scores.get("global_score", 0.5)
     
     # ===== Skill Extraction & Matching =====
-    # Prioritize Mistral-extracted skills if available, then normalize them
-    ao_skills_raw = ao_struct.get("competences_techniques", [])
-    cv_skills_raw = cv_struct.get("technologies", [])
-
-    # Fallback to regex extraction if Mistral fields are empty
-    if not ao_skills_raw:
-        ao_full_text = ao_blocks.get("full", "")
-        ao_skills_raw = extract_skills(ao_full_text)
-
-    if not cv_skills_raw:
-        cv_full_text = cv_blocks.get("full", "")
-        cv_skills_raw = extract_skills(cv_full_text)
+    # Use Mistral-extracted skills directly, unified for AO and CV
+    ao_skills_raw = _as_list(ao_struct.get("competences_techniques", [])) + _as_list(ao_struct.get("competences_metier", [])) + _as_list(ao_struct.get("technologies", []))
+    cv_skills_raw = _as_list(cv_struct.get("competences_techniques", [])) + _as_list(cv_struct.get("competences_metier", [])) + _as_list(cv_struct.get("technologies", []))
 
     # Ensure they're lists and normalize all skills to standardized forms
     if isinstance(ao_skills_raw, str):
@@ -595,12 +699,18 @@ def score_blocks_enhanced(
     else:
         skill_overlap_ratio = 0.5  # Neutral if no skills extracted
     
-    # Apply keyword presence bonus
-    keyword_bonus = _score_keyword_presence(ao_blocks.get("skills_like", ""), cv_blocks.get("skills_like", ""))
+    # Apply keyword presence bonus based on normalized skills
+    ao_skills_text = ", ".join(ao_skills_list)
+    cv_skills_text = ", ".join(cv_skills_list)
+    keyword_bonus = _score_keyword_presence(ao_skills_text, cv_skills_text)
     skills_score = 0.6 * skill_overlap_ratio + 0.4 * keyword_bonus
     
-    # ===== Seniority Alignment =====
-    # Prioritize Mistral-extracted seniority if available
+    # ===== Domain/Sector Match (Default 15% weight) =====
+    ao_domain = normalize_ws(str(ao_struct.get("secteur_principal", "") or ao_struct.get("secteur", "")))
+    cv_domains = _as_list(cv_struct.get("secteur_principal", []))
+    domain_score = _calculate_domain_match(ao_domain, cv_domains)
+    
+    # ===== Seniority (for filtering only, NOT in global score) =====
     ao_seniority_str = normalize_ws(str(ao_struct.get("seniorite", "") or ao_struct.get("experience_requise", "")))
     cv_seniority_str = normalize_ws(str(cv_struct.get("seniorite", "")))
     
@@ -608,34 +718,21 @@ def score_blocks_enhanced(
     cv_seniority_level = _parse_seniority(cv_seniority_str)
     seniority_score = _calculate_seniority_score(ao_seniority_level, cv_seniority_level)
     
-    # ===== Domain/Sector Match =====
-    ao_domain = normalize_ws(str(ao_struct.get("secteur_principal", "") or ao_struct.get("secteur", "")))
-    cv_domain = normalize_ws(str(cv_struct.get("secteur_principal", "")))
-    domain_score = _calculate_domain_match(ao_domain, cv_domain)
-    
-    # ===== Language Requirements =====
-    ao_langs_str = normalize_ws(str(ao_blocks.get("certification_like", "")))
-    cv_langs_str = normalize_ws(str(cv_blocks.get("certification_like", "")))
-    ao_languages = set(extract_languages(ao_langs_str))
-    cv_languages = set(extract_languages(cv_langs_str))
-    
-    if ao_languages:
-        lang_overlap = len(ao_languages & cv_languages) / len(ao_languages)
-        language_score = lang_overlap
+    # ===== Global Score (Weighted Combination - ONLY NLP + SKILLS + DOMAIN) =====
+    # nlp_weight (55%, default) + skills_weight (30%, default) + domain_weight (15%, default)
+    # Normalize weights to sum to 1.0
+    total_weight = nlp_weight + skills_weight + domain_weight
+    if total_weight > 0:
+        nlp_w = nlp_weight / total_weight
+        skills_w = skills_weight / total_weight
+        domain_w = domain_weight / total_weight
     else:
-        language_score = 0.5  # Neutral if no languages extracted
+        nlp_w, skills_w, domain_w = 0.55, 0.30, 0.15
     
-    # ===== Global Score (Weighted Combination) =====
-    # nlp_weight (50%) + skills (20%) + seniority (15%) + domain (10%) + language (5%)
-    non_nlp_weight = 1.0 - nlp_weight
     global_score = (
-        nlp_weight * nlp_score +
-        non_nlp_weight * (
-            0.40 * skills_score +
-            0.30 * seniority_score +
-            0.20 * domain_score +
-            0.10 * language_score
-        )
+        nlp_w * nlp_score +
+        skills_w * skills_score +
+        domain_w * domain_score
     )
     
     skill_details = {
@@ -649,10 +746,9 @@ def score_blocks_enhanced(
     return {
         "nlp_score": float(nlp_score),
         "skills_score": float(skills_score),
-        "seniority_score": float(seniority_score),
         "domain_score": float(domain_score),
-        "language_score": float(language_score),
         "global_score": float(global_score),
+        "seniority_score": float(seniority_score),  # For filtering only
         "skill_details": skill_details,
         "ao_seniority": ao_seniority_str,
         "cv_seniority": cv_seniority_str,

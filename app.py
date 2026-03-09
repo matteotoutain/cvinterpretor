@@ -18,9 +18,9 @@ from src.mistral_client import (
 )
 
 
-def create_radar_chart(nlp_score, skills_score, seniority_score, domain_score, language_score, global_score):
-    categories = ['NLP', 'Skills', 'Seniority', 'Domain', 'Language', 'Global']
-    values = [nlp_score, skills_score, seniority_score, domain_score, language_score, global_score]
+def create_radar_chart(nlp_score, skills_score, domain_score, global_score):
+    categories = ['NLP', 'Skills', 'Domain', 'Global']
+    values = [nlp_score, skills_score, domain_score, global_score]
 
     fig = go.Figure(data=go.Scatterpolar(
         r=values,
@@ -36,7 +36,7 @@ def create_radar_chart(nlp_score, skills_score, seniority_score, domain_score, l
         showlegend=False,
         height=380,
         margin=dict(l=40, r=40, t=60, b=40),
-        title=dict(text='Score Breakdown (NLP + Non-NLP Features)', x=0.5, xanchor='center')
+        title=dict(text='Score Breakdown (NLP + Skills + Domain)', x=0.5, xanchor='center')
     )
     return fig
 
@@ -129,7 +129,8 @@ Allowed content per category:
   - DO NOT infer soft skills from role descriptions.
 - certifications: ONLY explicit certification names (e.g., "PMP", "Salesforce Certified Associate", "AWS SAA").
   - DO NOT include trainings, courses, or degrees unless clearly stated as a certification.
-- secteur_principal / secteur: ONLY the industry/domain (e.g., banking, insurance, retail). Not tools.
+- secteur_principal / secteur: ONLY the industry/domain from this STANDARDIZED CONSULTING DOMAINS list. Use the exact term from the list below. Not tools or technologies.
+  STANDARDIZED CONSULTING DOMAINS: banking, finance, insurance, retail, e-commerce, media, luxury, energy, oil, gas, utilities, industry, manufacturing, automotive, telecom, telecommunications, technology, it, software, healthcare, pharmaceuticals, life sciences, public sector, government, defense, aerospace, transportation, logistics, real estate, construction, chemicals, mining, agriculture, food, beverages, consumer goods, travel, hospitality, sports, entertainment, education, non-profit, ngo, consulting, professional services, legal, accounting, audit.
 - langues: ONLY languages.
 
 NO INFERENCE:
@@ -209,6 +210,21 @@ with tabs[1]:
     ao_file = st.file_uploader("Dépose ton AO", type=["pdf", "docx", "txt", "pptx"], accept_multiple_files=False)
     top_k = st.slider("Nombre de profils à afficher", 3, 30, 10)
 
+    # Scoring coefficients
+    st.markdown("### ⚙️ Configuration du scoring")
+    col_coef1, col_coef2, col_coef3 = st.columns(3)
+    with col_coef1:
+        nlp_weight = st.slider("Poids NLP", 0.0, 1.0, 0.55, 0.05, key="nlp_weight")
+    with col_coef2:
+        skills_weight = st.slider("Poids Skills", 0.0, 1.0, 0.30, 0.05, key="skills_weight")
+    with col_coef3:
+        domain_weight = st.slider("Poids Domain", 0.0, 1.0, 0.15, 0.05, key="domain_weight")
+    
+    # Warning if weights don't sum to 1.0
+    total_weight = nlp_weight + skills_weight + domain_weight
+    if abs(total_weight - 1.0) > 0.01:
+        st.warning(f"⚠️ Somme des poids = {total_weight:.2f}. Les poids seront normalisés automatiquement.")
+
     if "ao_analysis_results" not in st.session_state:
         st.session_state.ao_analysis_results = None
 
@@ -253,7 +269,7 @@ with tabs[1]:
                             '  "contexte_mission": "Brief summary of the mission context and objectives",\n'
                             '  "competences_techniques": ["List of required technical skills from STANDARDIZED SKILLS list"],\n'
                             '  "competences_metier": ["List of business/soft skills expected"],\n'
-                            '  "secteur": "Industry domain if stated (banking, insurance, public sector, etc.)",\n'
+                            '  "secteur": "Industry domain from STANDARDIZED CONSULTING DOMAINS list: banking, finance, insurance, retail, e-commerce, media, luxury, energy, oil, gas, utilities, industry, manufacturing, automotive, telecom, telecommunications, technology, it, software, healthcare, pharmaceuticals, life sciences, public sector, government, defense, aerospace, transportation, logistics, real estate, construction, chemicals, mining, agriculture, food, beverages, consumer goods, travel, hospitality, sports, entertainment, education, non-profit, ngo, consulting, professional services, legal, accounting, audit",\n'
                             '  "experience_requise": "Required seniority level (one of: Junior, Senior, Manager) or years of experience",\n'
                             '  "langues_requises": ["Languages required"],\n'
                             '  "certifications_requises": ["Certifications explicitly required or strongly desired"]\n'
@@ -294,9 +310,12 @@ with tabs[1]:
 
                             cv_blocks = build_cv_blocks(cv_struct, cv_fallback_text=cv_text)
                             
-                            # Use enhanced scoring with non-NLP features
+                            # Use enhanced scoring with custom weights
                             scores, method = score_blocks_enhanced(
-                                ao_blocks, cv_blocks, ao_struct or {}, cv_struct
+                                ao_blocks, cv_blocks, ao_struct or {}, cv_struct,
+                                nlp_weight=nlp_weight,
+                                skills_weight=skills_weight,
+                                domain_weight=domain_weight
                             )
                             method_used = method_used or method
 
@@ -308,15 +327,13 @@ with tabs[1]:
                                 "seniorite": r.get("seniorite"),
                                 "secteur_principal": r.get("secteur_principal"),
                                 "technologies": r.get("technologies"),
-                                "langues": r.get("langues"),
                                 "cv_text": cv_text,
                                 "cv_struct_json": cv_struct_json,
-                                # New enhanced scoring fields
+                                # Enhanced scoring fields
                                 "nlp_score": scores["nlp_score"],
                                 "skills_score": scores["skills_score"],
                                 "seniority_score": scores["seniority_score"],
                                 "domain_score": scores["domain_score"],
-                                "language_score": scores["language_score"],
                                 "global_score": scores["global_score"],
                                 "skill_details": scores["skill_details"],
                                 "ao_seniority": scores.get("ao_seniority", ""),
@@ -350,7 +367,32 @@ with tabs[1]:
                         st.warning(f"⚠️ Mistral AO extraction failed: {ao_struct.get('error')}")
 
                     st.caption(f"Méthode embeddings : **{method}** (cosine similarity avec features structurelles).")
-                    st.info("Matching basé sur : **NLP (50%)** + **Skills (20%)** + **Seniority (15%)** + **Domain (10%)** + **Language (5%)**.")
+                    # Display actual weights used
+                    total_weight_display = nlp_weight + skills_weight + domain_weight
+                    if total_weight_display > 0:
+                        nlp_w_display = nlp_weight / total_weight_display
+                        skills_w_display = skills_weight / total_weight_display
+                        domain_w_display = domain_weight / total_weight_display
+                    else:
+                        nlp_w_display, skills_w_display, domain_w_display = 0.55, 0.30, 0.15
+                    st.info(f"Matching basé sur : **NLP ({nlp_w_display:.0%})** + **Skills ({skills_w_display:.0%})** + **Domain ({domain_w_display:.0%})**.")
+                    
+                    # Seniority filter
+                    st.markdown("### 🔍 Filtrer par seniorité")
+                    seniority_filter = st.selectbox(
+                        "Afficher seulement les CVs de séniorité",
+                        ["Tous", "Junior", "Senior", "Manager"],
+                        key="seniority_filter"
+                    )
+                    
+                    # Apply seniority filter
+                    filtered_cvs = cvs.copy()
+                    if seniority_filter != "Tous":
+                        filtered_cvs = filtered_cvs[filtered_cvs["cv_seniority"].str.contains(seniority_filter, case=False, na=False)]
+                    
+                    if len(filtered_cvs) == 0:
+                        st.warning(f"Aucun CV trouvé avec la séniorité '{seniority_filter}'")
+                        filtered_cvs = cvs  # Reset to show all if no matches
 
                     st.divider()
                     st.subheader("📥 Télécharger les meilleurs CVs")
@@ -360,14 +402,14 @@ with tabs[1]:
                         num_to_download = st.slider(
                             "Nombre de meilleurs CVs à télécharger",
                             1,
-                            min(10, len(cvs)),
-                            min(3, len(cvs)),
+                            min(10, len(filtered_cvs)),
+                            min(3, len(filtered_cvs)),
                             key="num_download"
                         )
                     with col2:
-                        st.info(f"Score moyen : {cvs['global_score'].mean():.3f}")
+                        st.info(f"Score moyen : {filtered_cvs['global_score'].mean():.3f}")
 
-                    top_cvs_to_download = cvs.head(num_to_download)
+                    top_cvs_to_download = filtered_cvs.head(num_to_download)
 
                     zip_buffer = io.BytesIO()
                     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
@@ -387,34 +429,28 @@ with tabs[1]:
                     st.divider()
                     st.subheader("Résultats détaillés")
 
-                    for idx, (_, row) in enumerate(cvs.iterrows(), 1):
+                    for idx, (_, row) in enumerate(filtered_cvs.iterrows(), 1):
                         title = f"{idx}. {row['filename']} — global {row['global_score']:.3f} — {row['verdict']}"
                         if idx <= num_to_download:
                             title = f"⭐ {title}"
 
                         with st.expander(title, expanded=(idx <= 3)):
-                            # Score breakdown (6 columns)
-                            c1, c2, c3, c4, c5, c6 = st.columns(6)
+                            # Score breakdown (4 columns: NLP, Skills, Domain, Global)
+                            c1, c2, c3, c4 = st.columns(4)
                             with c1:
                                 st.metric("NLP", f"{row['nlp_score']:.3f}")
                             with c2:
                                 st.metric("Skills", f"{row['skills_score']:.3f}")
                             with c3:
-                                st.metric("Seniority", f"{row['seniority_score']:.3f}")
-                            with c4:
                                 st.metric("Domain", f"{row['domain_score']:.3f}")
-                            with c5:
-                                st.metric("Language", f"{row['language_score']:.3f}")
-                            with c6:
+                            with c4:
                                 st.metric("Global", f"{row['global_score']:.3f}")
 
                             st.plotly_chart(
                                 create_radar_chart(
                                     row["nlp_score"],
                                     row["skills_score"],
-                                    row["seniority_score"],
                                     row["domain_score"],
-                                    row["language_score"],
                                     row["global_score"],
                                 ),
                                 use_container_width=True
@@ -459,7 +495,6 @@ with tabs[1]:
                                 "Seniorité": row["seniorite"] or "—",
                                 "Secteur": row["secteur_principal"] or "—",
                                 "Technologies": row["technologies"] or "—",
-                                "Langues": row["langues"] or "—",
                             }
                             st.table(pd.DataFrame(info_data.items(), columns=["Champ", "Valeur"]))
 
@@ -474,7 +509,7 @@ with tabs[1]:
                             )
 
                             if use_mistral_explain:
-                                st.markdown("**Explication IA (structurée)**")
+                                st.markdown("**🤖 AI Insights**")
                                 cv_struct = {}
                                 if row.get("cv_struct_json"):
                                     try:
@@ -490,7 +525,6 @@ with tabs[1]:
                                     "skills_score": float(row["skills_score"]),
                                     "seniority_score": float(row["seniority_score"]),
                                     "domain_score": float(row["domain_score"]),
-                                    "language_score": float(row["language_score"]),
                                     "global_score": float(row["global_score"]),
                                     "skill_details": row.get("skill_details", {}),
                                     "verdict": row["verdict"],
@@ -504,9 +538,31 @@ with tabs[1]:
                                 )
 
                                 if explain and not explain.get("error"):
-                                    st.json(explain)
+                                    # Display insights inline
+                                    insight_cols = st.columns([1, 1, 1])
+                                    with insight_cols[0]:
+                                        st.info(f"**NLP**: {explain.get('nlp_why', '—')}")
+                                    with insight_cols[1]:
+                                        st.info(f"**Skills**: {explain.get('skills_why', '—')}")
+                                    with insight_cols[2]:
+                                        st.info(f"**Domain**: {explain.get('domain_why', '—')}")
+                                    
+                                    # Overall assessment
+                                    fit_color = {"Strong": "🟢", "Moderate": "🟡", "Low": "🔴"}.get(explain.get('overall_fit'), "⚪")
+                                    st.success(f"{fit_color} **Overall**: {explain.get('overall_fit', 'Unknown')} fit")
+                                    
+                                    # Key points
+                                    key_cols = st.columns(2)
+                                    with key_cols[0]:
+                                        st.write(f"**💪 Strength**: {explain.get('key_strength', '—')}")
+                                    with key_cols[1]:
+                                        gap = explain.get('key_gap', '—')
+                                        if gap != 'None':
+                                            st.write(f"**⚠️ Gap**: {gap}")
+                                        else:
+                                            st.write("**✅ No major gaps**")
                                 else:
-                                    st.warning(f"⚠️ Explain failed: {explain.get('error') if isinstance(explain, dict) else 'Unknown error'}")
+                                    st.warning(f"⚠️ AI insights unavailable: {explain.get('error') if isinstance(explain, dict) else 'Unknown error'}")
 
         except Exception as e:
             st.error(str(e))
