@@ -134,13 +134,12 @@ def render_hero() -> None:
         st.markdown(
             """
             <div class="hero-card">
-                <div class="hero-title">Matching intelligent CV ↔ Appel d’offres</div>
+                <div class="hero-title">CV Interpretor</div>
                 <p class="hero-subtitle">
-                    Une interface orientée produit pour ingérer des profils,
-                    structurer les données, scorer les correspondances et expliquer les recommandations.
+                    Chargez vos CV et un appel d'offres. Nous structurons les données, scorons les correspondances et vous fournissons des recommandations.
                 </p>
                 <div class="badge-row">
-                    <span class="badge">Extraction documentaire</span>
+                    <span class="badge">Extraction</span>
                     <span class="badge">Structuration IA</span>
                     <span class="badge">Scoring multi-critères</span>
                     <span class="badge">Explicabilité</span>
