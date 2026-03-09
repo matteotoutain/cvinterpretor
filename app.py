@@ -291,7 +291,7 @@ cv_count = len(list_cvs(conn))
 metric1, metric2, metric3 = st.columns(3)
 metric1.metric("CV en base", cv_count)
 metric2.metric("Formats acceptés", "pptx / pdf / docx / txt")
-metric3.metric("Mode", "Prototype produit")
+metric3.metric("Mode", "IA / NLP")
 st.markdown("</div>", unsafe_allow_html=True)
 
 tabs = st.tabs(["📥 Import des CV", "🎯 Analyse d’un AO", "🗂️ Bibliothèque de CV"])
