@@ -2,8 +2,7 @@ import os
 import json
 from typing import Any, Dict
 
-from mistralai.client import MistralClient
-from mistralai.models.chat_completion import ChatMessage
+from mistralai import Mistral
 from dotenv import load_dotenv
 
 from .nlp import STANDARDIZED_SKILLS, CONSULTING_DOMAINS
